@@ -584,39 +584,19 @@ func (c *chainWatcher) closeObserver(spendNtfn *chainntnfs.SpendEvent) {
 				"state #%v!!! Attempting recovery...",
 				broadcastStateNum, remoteStateNum)
 
-			// If we are lucky, the remote peer sent us the correct
-			// commitment point during channel sync, such that we
-			// can sweep our funds. If we cannot find the commit
-			// point, there's not much we can do other than wait
-			// for us to retrieve it. We will attempt to retrieve
-			// it from the peer each time we connect to it.
-			//
-			// TODO(halseth): actively initiate re-connection to
-			// the peer?
-			var commitPoint *btcec.PublicKey
-			backoff := minCommitPointPollTimeout
-			for {
-				commitPoint, err = c.cfg.chanState.DataLossCommitPoint()
-				if err == nil {
-					break
-				}
+			tweaklessCommit := (c.cfg.chanState.ChanType ==
+				channeldb.SingleFunderTweakless)
 
-				log.Errorf("Unable to retrieve commitment "+
-					"point for channel(%v) with lost "+
-					"state: %v. Retrying in %v.",
-					c.cfg.chanState.FundingOutpoint,
-					err, backoff)
-
-				select {
-				// Wait before retrying, with an exponential
-				// backoff.
-				case <-time.After(backoff):
-					backoff = 2 * backoff
-					if backoff > maxCommitPointPollTimeout {
-						backoff = maxCommitPointPollTimeout
-					}
-
-				case <-c.quit:
+			// If this isn't a tweakless commitment, then we'll
+			// need to wait for the remote party's latest unrevoked
+			// commitment point to be presented to us as we need
+			// this to sweep. Otherwise, we can dispatch the remote
+			// close and sweep immediately using a fake commitPoint
+			// as it isn't actually needed for recovery anymore.
+			commitPoint := c.cfg.chanState.RemoteCurrentRevocation
+			if !tweaklessCommit {
+				commitPoint = c.waitForCommitmentPoint()
+				if commitPoint == nil {
 					return
 				}
 			}
@@ -1017,4 +997,40 @@ func (c *chainWatcher) dispatchContractBreach(spendEvent *chainntnfs.SpendDetail
 		c.cfg.chanState.FundingOutpoint)
 
 	return nil
+}
+
+// waitForCommitmentPoint waits for the commitment point to be inserted into
+// the local database. We'll use this method in the DLP case, to wait for the
+// remote party to send us their point, as we can't proceed until we have that.
+func (c *chainWatcher) waitForCommitmentPoint() *btcec.PublicKey {
+	// If we are lucky, the remote peer sent us the correct commitment
+	// point during channel sync, such that we can sweep our funds. If we
+	// cannot find the commit point, there's not much we can do other than
+	// wait for us to retrieve it. We will attempt to retrieve it from the
+	// peer each time we connect to it.
+	//
+	// TODO(halseth): actively initiate re-connection to the peer?
+	backoff := minCommitPointPollTimeout
+	for {
+		commitPoint, err := c.cfg.chanState.DataLossCommitPoint()
+		if err == nil {
+			return commitPoint
+		}
+
+		log.Errorf("Unable to retrieve commitment point for "+
+			"channel(%v) with lost state: %v. Retrying in %v.",
+			c.cfg.chanState.FundingOutpoint, err, backoff)
+
+		select {
+		// Wait before retrying, with an exponential backoff.
+		case <-time.After(backoff):
+			backoff = 2 * backoff
+			if backoff > maxCommitPointPollTimeout {
+				backoff = maxCommitPointPollTimeout
+			}
+
+		case <-c.quit:
+			return nil
+		}
+	}
 }
