@@ -509,9 +509,7 @@ func (f *fundingManager) start() error {
 		// already broadcast this transaction. Otherwise, we simply log
 		// the error as there isn't anything we can currently do to
 		// recover.
-		if channel.ChanType == channeldb.SingleFunder &&
-			channel.IsInitiator {
-
+		if channel.ChanType.IsSingleFunder() && channel.IsInitiator {
 			err := f.cfg.PublishTransaction(channel.FundingTxn)
 			if err != nil {
 				fndgLog.Errorf("Unable to rebroadcast funding "+
@@ -1073,6 +1071,8 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 	// reservation attempt may be rejected. Note that since we're on the
 	// responding side of a single funder workflow, we don't commit any
 	// funds to the channel ourselves.
+	//
+	// TODO(roasbeef): signal tweakless or not
 	chainHash := chainhash.Hash(msg.ChainHash)
 	req := &lnwallet.InitFundingReserveMsg{
 		ChainHash:        &chainHash,
@@ -2784,6 +2784,8 @@ func (f *fundingManager) handleInitFundingMsg(msg *initFundingMsg) {
 	// Initialize a funding reservation with the local wallet. If the
 	// wallet doesn't have enough funds to commit to this channel, then the
 	// request will fail, and be aborted.
+	//
+	// TODO(roasbeef): signal tweakless or not
 	req := &lnwallet.InitFundingReserveMsg{
 		ChainHash:        &msg.chainHash,
 		NodeID:           peerKey,

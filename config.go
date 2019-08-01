@@ -36,6 +36,10 @@ import (
 	"github.com/lightningnetwork/lnd/tor"
 )
 
+// TODO(roasbef): add legaacy commit type to be able to still have integration
+// tests for?
+//  * put it behind a build flag?
+
 const (
 	defaultConfigFilename     = "lnd.conf"
 	defaultDataDirname        = "data"
