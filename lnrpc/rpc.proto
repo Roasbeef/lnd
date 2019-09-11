@@ -1176,6 +1176,9 @@ message Channel {
     The minimum satoshis the other node is required to reserve in its balance.
     */
     int64 remote_chan_reserve_sat = 21 [json_name = "remote_chan_reserve_sat"];
+
+    /// If true, then this channel uses the modern commitment format.
+    bool tweakless = 22 [json_name = "tweakless"];
 }
 
 
