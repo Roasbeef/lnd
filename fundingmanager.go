@@ -1072,7 +1072,17 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 	// responding side of a single funder workflow, we don't commit any
 	// funds to the channel ourselves.
 	//
-	// TODO(roasbeef): signal tweakless or not
+	// Before we init the channel, we'll also check to see if we've
+	// negotiated the new tweakless commitment format. This is only the
+	// case if *both* us and the remote peer are signalling the proper
+	// feature bit.
+	localTweakless := fmsg.peer.LocalFeatures().HasFeature(
+		lnwire.StaticRemoteKeyOptional,
+	)
+	remoteTweakless := fmsg.peer.RemoteFeatures().HasFeature(
+		lnwire.StaticRemoteKeyOptional,
+	)
+	tweaklessCommitment := localTweakless && remoteTweakless
 	chainHash := chainhash.Hash(msg.ChainHash)
 	req := &lnwallet.InitFundingReserveMsg{
 		ChainHash:        &chainHash,
@@ -1085,6 +1095,7 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 		PushMSat:         msg.PushAmount,
 		Flags:            msg.ChannelFlags,
 		MinConfs:         1,
+		Tweakless:        tweaklessCommitment,
 	}
 
 	reservation, err := f.cfg.Wallet.InitChannelReservation(req)
@@ -2785,7 +2796,17 @@ func (f *fundingManager) handleInitFundingMsg(msg *initFundingMsg) {
 	// wallet doesn't have enough funds to commit to this channel, then the
 	// request will fail, and be aborted.
 	//
-	// TODO(roasbeef): signal tweakless or not
+	// Before we init the channel, we'll also check to see if we've
+	// negotiated the new tweakless commitment format. This is only the
+	// case if *both* us and the remote peer are signalling the proper
+	// feature bit.
+	localTweakless := msg.peer.LocalFeatures().HasFeature(
+		lnwire.StaticRemoteKeyOptional,
+	)
+	remoteTweakless := msg.peer.RemoteFeatures().HasFeature(
+		lnwire.StaticRemoteKeyOptional,
+	)
+	tweaklessCommitment := localTweakless && remoteTweakless
 	req := &lnwallet.InitFundingReserveMsg{
 		ChainHash:        &msg.chainHash,
 		NodeID:           peerKey,
@@ -2798,6 +2819,7 @@ func (f *fundingManager) handleInitFundingMsg(msg *initFundingMsg) {
 		PushMSat:         msg.pushAmt,
 		Flags:            channelFlags,
 		MinConfs:         msg.minConfs,
+		Tweakless:        tweaklessCommitment,
 	}
 
 	reservation, err := f.cfg.Wallet.InitChannelReservation(req)
