@@ -1438,7 +1438,9 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 				PubKey: copyPubKey(msg.HtlcPoint),
 			},
 		},
-		UpfrontShutdown: msg.UpfrontShutdownScript,
+		UpfrontShutdown: lnwire.DeliveryAddress(
+			msg.UpfrontShutdownScript,
+		),
 	}
 	err = reservation.ProcessSingleContribution(remoteContribution)
 	if err != nil {
@@ -1456,21 +1458,23 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 	// contribution in the next message of the workflow.
 	ourContribution := reservation.OurContribution()
 	fundingAccept := lnwire.AcceptChannel{
-		PendingChannelID:      msg.PendingChannelID,
-		DustLimit:             ourContribution.DustLimit,
-		MaxValueInFlight:      remoteMaxValue,
-		ChannelReserve:        chanReserve,
-		MinAcceptDepth:        uint32(numConfsReq),
-		HtlcMinimum:           minHtlc,
-		CsvDelay:              remoteCsvDelay,
-		MaxAcceptedHTLCs:      maxHtlcs,
-		FundingKey:            ourContribution.MultiSigKey.PubKey,
-		RevocationPoint:       ourContribution.RevocationBasePoint.PubKey,
-		PaymentPoint:          ourContribution.PaymentBasePoint.PubKey,
-		DelayedPaymentPoint:   ourContribution.DelayBasePoint.PubKey,
-		HtlcPoint:             ourContribution.HtlcBasePoint.PubKey,
-		FirstCommitmentPoint:  ourContribution.FirstCommitmentPoint,
-		UpfrontShutdownScript: ourContribution.UpfrontShutdown,
+		PendingChannelID:     msg.PendingChannelID,
+		DustLimit:            ourContribution.DustLimit,
+		MaxValueInFlight:     remoteMaxValue,
+		ChannelReserve:       chanReserve,
+		MinAcceptDepth:       uint32(numConfsReq),
+		HtlcMinimum:          minHtlc,
+		CsvDelay:             remoteCsvDelay,
+		MaxAcceptedHTLCs:     maxHtlcs,
+		FundingKey:           ourContribution.MultiSigKey.PubKey,
+		RevocationPoint:      ourContribution.RevocationBasePoint.PubKey,
+		PaymentPoint:         ourContribution.PaymentBasePoint.PubKey,
+		DelayedPaymentPoint:  ourContribution.DelayBasePoint.PubKey,
+		HtlcPoint:            ourContribution.HtlcBasePoint.PubKey,
+		FirstCommitmentPoint: ourContribution.FirstCommitmentPoint,
+		UpfrontShutdownScript: lnwire.TypedDeliveryAddress(
+			ourContribution.UpfrontShutdown,
+		),
 	}
 
 	if err := fmsg.peer.SendMessage(true, &fundingAccept); err != nil {
@@ -1581,7 +1585,9 @@ func (f *fundingManager) handleFundingAccept(fmsg *fundingAcceptMsg) {
 				PubKey: copyPubKey(msg.HtlcPoint),
 			},
 		},
-		UpfrontShutdown: msg.UpfrontShutdownScript,
+		UpfrontShutdown: lnwire.DeliveryAddress(
+			msg.UpfrontShutdownScript,
+		),
 	}
 	err = resCtx.reservation.ProcessContribution(remoteContribution)
 
@@ -3268,7 +3274,7 @@ func (f *fundingManager) handleInitFundingMsg(msg *initFundingMsg) {
 		DelayedPaymentPoint:   ourContribution.DelayBasePoint.PubKey,
 		FirstCommitmentPoint:  ourContribution.FirstCommitmentPoint,
 		ChannelFlags:          channelFlags,
-		UpfrontShutdownScript: shutdown,
+		UpfrontShutdownScript: lnwire.TypedDeliveryAddress(shutdown),
 	}
 	if err := msg.peer.SendMessage(true, &fundingOpen); err != nil {
 		e := fmt.Errorf("unable to send funding request message: %v",
