@@ -222,11 +222,17 @@ func Main(lisCfg ListenerCfg) error {
 	ltndLog.Infof("Opening the main database, this might take a few " +
 		"minutes...")
 
+	chanDbBackend, err := cfg.DB.GetBackend(cfg.localDatabaseDir())
+	if err != nil {
+		ltndLog.Error(err)
+		return err
+	}
+
 	// Open the channeldb, which is dedicated to storing channel, and
 	// network related metadata.
 	startOpenTime := time.Now()
-	chanDB, err := channeldb.Open(
-		cfg.localDatabaseDir(),
+	chanDB, err := channeldb.CreateWithBackend(
+		chanDbBackend,
 		channeldb.OptionSetRejectCacheSize(cfg.Caches.RejectCacheSize),
 		channeldb.OptionSetChannelCacheSize(cfg.Caches.ChannelCacheSize),
 		channeldb.OptionSetSyncFreelist(cfg.SyncFreelist),
