@@ -356,6 +356,8 @@ type config struct {
 	ProtocolOptions *lncfg.ProtocolOptions `group:"protocol" namespace:"protocol"`
 
 	AllowCircularRoute bool `long:"allow-circular-route" description:"If true, our node will allow htlc forwards that arrive and depart on the same channel."`
+
+	DB *lncfg.DB `group:"db" namespace:"db"`
 }
 
 // loadConfig initializes and parses the config using a config file and command
@@ -464,6 +466,7 @@ func loadConfig() (*config, error) {
 		},
 		MaxOutgoingCltvExpiry:   htlcswitch.DefaultMaxOutgoingCltvExpiry,
 		MaxChannelFeeAllocation: htlcswitch.DefaultMaxLinkFeeAllocation,
+		DB:                      lncfg.DefaultDB(),
 	}
 
 	// Pre-parse the command line options to pick up an alternative config
@@ -1139,6 +1142,7 @@ func loadConfig() (*config, error) {
 		cfg.Workers,
 		cfg.Caches,
 		cfg.WtClient,
+		cfg.DB,
 	)
 	if err != nil {
 		return nil, err
@@ -1160,6 +1164,14 @@ func loadConfig() (*config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// localDatabaseDir returns the default directory where the
+// local bolt db files are stored.
+func (c *config) localDatabaseDir() string {
+	return filepath.Join(cfg.DataDir,
+		defaultGraphSubDirname,
+		normalizeNetwork(activeNetParams.Name))
 }
 
 // cleanAndExpandPath expands environment variables and leading ~ in the
