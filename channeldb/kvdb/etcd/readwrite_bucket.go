@@ -1,6 +1,7 @@
 package etcd
 
 import (
+	"bytes"
 	"strconv"
 
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -21,6 +22,10 @@ type readWriteBucket struct {
 // newReadWriteBucket creates a new rw bucket with the passed transaction
 // and bucket id.
 func newReadWriteBucket(tx *readWriteTx, id []byte) *readWriteBucket {
+	if !bytes.Equal(id, rootBucketID()) {
+		tx.stm.Lock(string(id))
+	}
+
 	return &readWriteBucket{
 		id: id,
 		tx: tx,
