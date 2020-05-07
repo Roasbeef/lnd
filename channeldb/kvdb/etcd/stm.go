@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	v3 "github.com/coreos/etcd/clientv3"
 )
@@ -328,6 +329,7 @@ func (rs readSet) cmps(lset []string) []v3.Cmp {
 				)
 			}
 		}
+		fmt.Printf("cmp set size: %v\n", len(cmps))
 		return cmps
 	}
 
@@ -741,6 +743,8 @@ func (s *stm) commit() (CommitStats, error) {
 		Wset: len(s.wset),
 	}
 
+	fmt.Printf("read size size: %v, write set size: %v\n", len(s.rset), len(s.wset))
+
 	// Create the compare set.
 	cmps := append(s.rset.cmps(s.lset), s.wset.cmps(s.revision+1)...)
 	// Create a transaction with the optional abort context.
@@ -754,6 +758,7 @@ func (s *stm) commit() (CommitStats, error) {
 	// a round trip to etcd.
 	txn = txn.Else(s.rset.gets()...)
 
+	now := time.Now()
 	txnresp, err := txn.Commit()
 	if err != nil {
 		return stats, DatabaseError{
@@ -761,6 +766,7 @@ func (s *stm) commit() (CommitStats, error) {
 			err: err,
 		}
 	}
+	fmt.Println("commit duration: ", time.Since(now))
 
 	// Call the commit callback if the transaction
 	// was successful.
