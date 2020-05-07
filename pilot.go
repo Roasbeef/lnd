@@ -183,7 +183,7 @@ func initAutoPilot(svr *server, cfg *autoPilotConfig, chainCfg *chainConfig) (
 		WalletBalance: func() (btcutil.Amount, error) {
 			return svr.cc.wallet.ConfirmedBalance(cfg.MinConfs)
 		},
-		Graph:       autopilot.ChannelGraphFromDatabase(svr.chanDB.ChannelGraph()),
+		Graph:       autopilot.ChannelGraphFromDatabase(svr.localChanDB.ChannelGraph()),
 		Constraints: atplConstraints,
 		ConnectToPeer: func(target *btcec.PublicKey, addrs []net.Addr) (bool, error) {
 			// First, we'll check if we're already connected to the
@@ -254,7 +254,7 @@ func initAutoPilot(svr *server, cfg *autoPilotConfig, chainCfg *chainConfig) (
 			// We'll fetch the current state of open
 			// channels from the database to use as initial
 			// state for the auto-pilot agent.
-			activeChannels, err := svr.chanDB.FetchAllChannels()
+			activeChannels, err := svr.remoteChanDB.FetchAllChannels()
 			if err != nil {
 				return nil, err
 			}

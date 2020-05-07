@@ -380,7 +380,7 @@ func (p *peer) Start() error {
 
 	// Fetch and then load all the active channels we have with this remote
 	// peer from the database.
-	activeChans, err := p.server.chanDB.FetchOpenChannels(p.addr.IdentityKey)
+	activeChans, err := p.server.remoteChanDB.FetchOpenChannels(p.addr.IdentityKey)
 	if err != nil {
 		peerLog.Errorf("unable to fetch active chans "+
 			"for peer %v: %v", p, err)
@@ -540,7 +540,7 @@ func (p *peer) loadActiveChannels(chans []*channeldb.OpenChannel) (
 		// Before we register this new link with the HTLC Switch, we'll
 		// need to fetch its current link-layer forwarding policy from
 		// the database.
-		graph := p.server.chanDB.ChannelGraph()
+		graph := p.server.localChanDB.ChannelGraph()
 		info, p1, p2, err := graph.FetchChannelEdgesByOutpoint(chanPoint)
 		if err != nil && err != channeldb.ErrEdgeNotFound {
 			return nil, err
@@ -2707,7 +2707,7 @@ func (p *peer) resendChanSyncMsg(cid lnwire.ChannelID) error {
 	}
 
 	// Check if we have any channel sync messages stored for this channel.
-	c, err := p.server.chanDB.FetchClosedChannelForID(cid)
+	c, err := p.server.remoteChanDB.FetchClosedChannelForID(cid)
 	if err != nil {
 		return fmt.Errorf("unable to fetch channel sync messages for "+
 			"peer %v: %v", p, err)

@@ -372,7 +372,8 @@ func createTestPeer(notifier chainntnfs.ChainNotifier, publTx chan *wire.MsgTx,
 	chainArb.WatchNewChannel(aliceChannelState)
 
 	s := &server{
-		chanDB:        dbAlice,
+		localChanDB:   dbAlice,
+		remoteChanDB:  dbAlice,
 		cc:            cc,
 		breachArbiter: breachArbiter,
 		chainArb:      chainArb,

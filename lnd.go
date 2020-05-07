@@ -222,27 +222,68 @@ func Main(lisCfg ListenerCfg) error {
 	ltndLog.Infof("Opening the main database, this might take a few " +
 		"minutes...")
 
-	chanDbBackend, err := cfg.DB.GetBackend(cfg.localDatabaseDir())
+	localDB, remoteDB, err := cfg.DB.GetBackend(cfg.localDatabaseDir())
 	if err != nil {
 		ltndLog.Error(err)
 		return err
 	}
 
-	// Open the channeldb, which is dedicated to storing channel, and
-	// network related metadata.
 	startOpenTime := time.Now()
-	chanDB, err := channeldb.CreateWithBackend(
-		chanDbBackend,
-		channeldb.OptionSetRejectCacheSize(cfg.Caches.RejectCacheSize),
-		channeldb.OptionSetChannelCacheSize(cfg.Caches.ChannelCacheSize),
-		channeldb.OptionSetSyncFreelist(cfg.SyncFreelist),
-	)
-	if err != nil {
-		err := fmt.Errorf("Unable to open channeldb: %v", err)
-		ltndLog.Error(err)
-		return err
+
+	var localChanDB, remoteChanDB *channeldb.DB
+
+	// If the remoteDB is nil, then we'll just open a local DB as normal,
+	// having the remote and local pointer be the exact same instance.
+	if remoteDB == nil {
+		// Open the channeldb, which is dedicated to storing channel, and
+		// network related metadata.
+		localChanDB, err = channeldb.CreateWithBackend(
+			localDB,
+			channeldb.OptionSetRejectCacheSize(cfg.Caches.RejectCacheSize),
+			channeldb.OptionSetChannelCacheSize(cfg.Caches.ChannelCacheSize),
+			channeldb.OptionSetSyncFreelist(cfg.SyncFreelist),
+		)
+		if err != nil {
+			err := fmt.Errorf("Unable to open local channeldb: %v", err)
+			ltndLog.Error(err)
+			return err
+		}
+		defer localChanDB.Close()
+
+		remoteChanDB = localChanDB
+	} else {
+		ltndLog.Infof("Database replication detected! Creating " +
+			"local and remote channeldb instances")
+
+		// Otherwise, we'll open two instances, one for the state we only
+		// need locally, and the other for things we want to ensure are
+		// replicated.
+		localChanDB, err = channeldb.CreateWithBackend(
+			localDB,
+			channeldb.OptionSetRejectCacheSize(cfg.Caches.RejectCacheSize),
+			channeldb.OptionSetChannelCacheSize(cfg.Caches.ChannelCacheSize),
+			channeldb.OptionSetSyncFreelist(cfg.SyncFreelist),
+		)
+		if err != nil {
+			err := fmt.Errorf("Unable to open local channeldb: %v", err)
+			ltndLog.Error(err)
+			return err
+		}
+		defer localChanDB.Close()
+
+		remoteChanDB, err = channeldb.CreateWithBackend(
+			remoteDB,
+			channeldb.OptionSetRejectCacheSize(cfg.Caches.RejectCacheSize),
+			channeldb.OptionSetChannelCacheSize(cfg.Caches.ChannelCacheSize),
+			channeldb.OptionSetSyncFreelist(cfg.SyncFreelist),
+		)
+		if err != nil {
+			err := fmt.Errorf("Unable to open remote channeldb: %v", err)
+			ltndLog.Error(err)
+			return err
+		}
+		defer remoteChanDB.Close()
 	}
-	defer chanDB.Close()
 
 	openTime := time.Since(startOpenTime)
 	ltndLog.Infof("Database now open (time_to_open=%v)!", openTime)
@@ -424,8 +465,12 @@ func Main(lisCfg ListenerCfg) error {
 	// With the information parsed from the configuration, create valid
 	// instances of the pertinent interfaces required to operate the
 	// Lightning Network Daemon.
+	//
+	// When we create the chain control, we need storage for the height
+	// hints and also the wallet itself, for these two we want them to be
+	// replicated, so we'll pass in the remote channel DB instance.
 	activeChainControl, err := newChainControlFromConfig(
-		cfg, chanDB, privateWalletPw, publicWalletPw,
+		cfg, remoteChanDB, privateWalletPw, publicWalletPw,
 		walletInitParams.Birthday, walletInitParams.RecoveryWindow,
 		walletInitParams.Wallet, neutrinoCS,
 	)
@@ -582,9 +627,9 @@ func Main(lisCfg ListenerCfg) error {
 	// Set up the core server which will listen for incoming peer
 	// connections.
 	server, err := newServer(
-		cfg.Listeners, chanDB, towerClientDB, activeChainControl,
-		idPrivKey, walletInitParams.ChansToRestore, chainedAcceptor,
-		torController,
+		cfg.Listeners, localChanDB, remoteChanDB, towerClientDB,
+		activeChainControl, idPrivKey, walletInitParams.ChansToRestore,
+		chainedAcceptor, torController,
 	)
 	if err != nil {
 		err := fmt.Errorf("Unable to create server: %v", err)
