@@ -27,6 +27,8 @@ type EtcdDB struct {
 	Pass string `long:"pass" description:"Password for the database user."`
 
 	CollectStats bool `long:"collect_stats" description:"Wheter to collect etcd commit stats."`
+
+	TLSPath string
 }
 
 // DB holds database configuration for LND.
@@ -66,19 +68,40 @@ func (db *DB) Validate() error {
 	return nil
 }
 
-// GetBackend returns a kvdb.Backend as set in the DB config.
-func (db *DB) GetBackend(path string) (kvdb.Backend, error) {
+// GetBackend returns a kvdb.Backend as set in the DB config. The database
+// returned is the local database, and the second the remote database. The
+// remote database will ALWAYS be non-nil, while the remote database will only
+// be populated if etcd is specified.
+func (db *DB) GetBackend(path string) (kvdb.Backend, kvdb.Backend, error) {
+	var (
+		localDB, remoteDB kvdb.Backend
+		err               error
+	)
+
 	if db.Backend == etcdBackend {
 		backendConfig := etcd.BackendConfig{
 			Host:               db.Etcd.Host,
 			User:               db.Etcd.User,
 			Pass:               db.Etcd.Pass,
 			CollectCommitStats: db.Etcd.CollectStats,
+			TLSPath:            db.Etcd.TLSPath,
 		}
-		return kvdb.Open(kvdb.EtcdBackendName, backendConfig)
+		fmt.Println("DOING ETCD!!!!!!")
+
+		remoteDB, err = kvdb.Open(kvdb.EtcdBackendName, backendConfig)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
-	return kvdb.GetBoltBackend(path, dbName, db.Bolt.NoFreeListSync)
+	localDB, err = kvdb.GetBoltBackend(
+		path, dbName, db.Bolt.NoFreeListSync,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return localDB, remoteDB, nil
 }
 
 // Compile-time constraint to ensure Workers implements the Validator interface.
