@@ -119,10 +119,12 @@ crossfire &
 crossfire &
 crossfire &
 
-# Kill an lnd instance every 10 seconds until the channel dies.
+# Kill an lnd instance every 60 seconds until the channel dies.
 while [[ $($LNCLI_ALICE listchannels --active_only | jq '.channels | length') -ne 0 ]]
 do
   LND_PID=$(ps | grep lnd | head -1 | awk '{ printf $1 }')
+  echo "Killing $LND_PID"
+  echo "Killing $LND_PID"
   echo "Killing $LND_PID"
   kill -9 $LND_PID
 

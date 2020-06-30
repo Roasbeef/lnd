@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -366,6 +367,31 @@ type PaymentDescriptor struct {
 	// isForwarded denotes if an incoming HTLC has been forwarded to any
 	// possible upstream peers in the route.
 	isForwarded bool
+}
+
+func (p *PaymentDescriptor) String() string {
+	var b strings.Builder
+
+	b.WriteString("{\n")
+
+	b.WriteString(fmt.Sprintf("Type: %v,\n", p.EntryType))
+	b.WriteString(fmt.Sprintf("PayHash: %x,\n", p.RHash[:]))
+
+	b.WriteString(fmt.Sprintf("LogIndex: %v,\n", p.LogIndex))
+
+	b.WriteString(fmt.Sprintf("HtlcIndex: %v,\n", p.HtlcIndex))
+
+	b.WriteString(fmt.Sprintf("ParentIndex: %v,\n", p.ParentIndex))
+
+	b.WriteString(fmt.Sprintf("addCommitHeightLocal: %v,\n", p.addCommitHeightLocal))
+	b.WriteString(fmt.Sprintf("addCommitHeightRemote: %v,\n", p.addCommitHeightRemote))
+
+	b.WriteString(fmt.Sprintf("removeCommitHeightLocal: %v,\n", p.removeCommitHeightLocal))
+	b.WriteString(fmt.Sprintf("removeCommitHeightRemote: %v,\n", p.removeCommitHeightRemote))
+
+	b.WriteString("}\n")
+
+	return b.String()
 }
 
 // PayDescsFromRemoteLogUpdates converts a slice of LogUpdates received from the
@@ -1122,6 +1148,9 @@ func (u *updateLog) lookupHtlc(i uint64) *PaymentDescriptor {
 // remove attempts to remove an entry from the update log. If the entry is
 // found, then the entry will be removed from the update log and index.
 func (u *updateLog) removeUpdate(i uint64) {
+	walletLog.Infof("removing htlc w/ log index: %v", i)
+	walletLog.Infof("update index: %v", spew.Sdump(u.updateIndex))
+
 	entry := u.updateIndex[i]
 	u.Remove(entry)
 	delete(u.updateIndex, i)
@@ -1188,6 +1217,8 @@ func compactLogs(ourLog, theirLog *updateLog,
 			if remoteChainTail >= htlc.removeCommitHeightRemote &&
 				localChainTail >= htlc.removeCommitHeightLocal {
 
+				walletLog.Infof("removing udpate: %v", spew.Sdump(htlc))
+
 				// Fee updates have no parent htlcs, so we only
 				// remove the update itself.
 				if htlc.EntryType == FeeUpdate {
@@ -1207,6 +1238,9 @@ func compactLogs(ourLog, theirLog *updateLog,
 
 	compactLog(ourLog, theirLog)
 	compactLog(theirLog, ourLog)
+
+	// TODO(roasbeef): htlc in logs after revoke when saving our changes...
+	//  * case that our next sig or revoke sent triggers compaction and removes it?
 }
 
 // LightningChannel implements the state machine which corresponds to the
@@ -1540,6 +1574,8 @@ func (lc *LightningChannel) localLogUpdateToPayDesc(logUpdate *channeldb.LogUpda
 	remoteUpdateLog *updateLog, commitHeight uint64) (*PaymentDescriptor,
 	error) {
 
+	lc.log.Infof("restoring: %v", spew.Sdump(logUpdate))
+
 	// The logUpdate here won't ever be an Add.
 	switch wireMsg := logUpdate.UpdateMsg.(type) {
 
@@ -1548,6 +1584,12 @@ func (lc *LightningChannel) localLogUpdateToPayDesc(logUpdate *channeldb.LogUpda
 	// ReceiveHTLCSettle would produce.
 	case *lnwire.UpdateFulfillHTLC:
 		ogHTLC := remoteUpdateLog.lookupHtlc(wireMsg.ID)
+
+		if ogHTLC == nil {
+			lc.log.Infof("remote update log: %v", spew.Sdump(remoteUpdateLog))
+			lc.log.Infof("local update log: %v", spew.Sdump(lc.localUpdateLog))
+			return nil, nil
+		}
 
 		// todo: somehow ogHTLC is nil in the docker test
 		if ogHTLC.addCommitHeightRemote == 0 {
@@ -1572,10 +1614,19 @@ func (lc *LightningChannel) localLogUpdateToPayDesc(logUpdate *channeldb.LogUpda
 	case *lnwire.UpdateFailHTLC:
 		ogHTLC := remoteUpdateLog.lookupHtlc(wireMsg.ID)
 
+		if ogHTLC == nil {
+			lc.log.Infof("remote update log: %v", spew.Sdump(remoteUpdateLog))
+			lc.log.Infof("local update log: %v", spew.Sdump(lc.localUpdateLog))
+			return nil, nil
+		}
+
 		// todo: same panic comment
 		if ogHTLC.addCommitHeightRemote == 0 {
 			ogHTLC.addCommitHeightRemote = commitHeight - 1
 		}
+
+		// TODO(roasbeef): don't need anything here really but the
+		// index and removal information?
 
 		return &PaymentDescriptor{
 			Amount:                   ogHTLC.Amount,
@@ -1773,12 +1824,6 @@ func (lc *LightningChannel) restoreCommitState(
 	}
 	lc.localCommitChain.addCommitment(localCommit)
 
-	lc.log.Debugf("starting local commitment: %v",
-		newLogClosure(func() string {
-			return spew.Sdump(lc.localCommitChain.tail())
-		}),
-	)
-
 	// We'll also do the same for the remote commitment chain.
 	remoteCommit, err := lc.diskCommitToMemCommit(
 		false, remoteCommitState, localCommitPoint,
@@ -1788,12 +1833,6 @@ func (lc *LightningChannel) restoreCommitState(
 		return err
 	}
 	lc.remoteCommitChain.addCommitment(remoteCommit)
-
-	lc.log.Debugf("starting remote commitment: %v",
-		newLogClosure(func() string {
-			return spew.Sdump(lc.remoteCommitChain.tail())
-		}),
-	)
 
 	var (
 		pendingRemoteCommit     *commitment
@@ -1850,6 +1889,26 @@ func (lc *LightningChannel) restoreCommitState(
 		return err
 	}
 
+	lc.log.Debugf("pre log starting local commitment: %v",
+		newLogClosure(func() string {
+			return spew.Sdump(lc.localCommitChain.tail())
+		}),
+	)
+
+	lc.log.Debugf("pre log starting remote commitment: %v",
+		newLogClosure(func() string {
+			return spew.Sdump(lc.remoteCommitChain.tail())
+		}),
+	)
+
+	if pendingRemoteCommitDiff != nil {
+		lc.log.Debugf("pre log pending remote commitment: %v",
+			newLogClosure(func() string {
+				return spew.Sdump(lc.remoteCommitChain.tip())
+			}),
+		)
+	}
+
 	// Finally, with the commitment states restored, we'll now restore the
 	// state logs based on the current local+remote commit, and any pending
 	// remote commit that exists.
@@ -1860,6 +1919,26 @@ func (lc *LightningChannel) restoreCommitState(
 	)
 	if err != nil {
 		return err
+	}
+
+	lc.log.Debugf("starting local commitment: %v",
+		newLogClosure(func() string {
+			return spew.Sdump(lc.localCommitChain.tail())
+		}),
+	)
+
+	lc.log.Debugf("starting remote commitment: %v",
+		newLogClosure(func() string {
+			return spew.Sdump(lc.remoteCommitChain.tail())
+		}),
+	)
+
+	if pendingRemoteCommitDiff != nil {
+		lc.log.Debugf("pending remote commitment: %v",
+			newLogClosure(func() string {
+				return spew.Sdump(lc.remoteCommitChain.tip())
+			}),
+		)
 	}
 
 	return nil
@@ -1936,6 +2015,9 @@ func (lc *LightningChannel) restoreStateLogs(
 		htlc.addCommitHeightRemote = remoteCommitment.height
 		htlc.addCommitHeightLocal = outgoingLocalAddHeights[htlc.HtlcIndex]
 
+		// TODO(roasbeef): above lines can mean that we restore w/ a
+		// zero local height
+
 		// Restore the htlc back to the local log.
 		lc.localUpdateLog.restoreHtlc(&htlc)
 	}
@@ -1990,6 +2072,8 @@ func (lc *LightningChannel) restorePendingRemoteUpdates(
 		if err != nil {
 			return err
 		}
+
+		lc.log.Debugf("restoring %v", spew.Sdump(payDesc))
 
 		// Sanity check that we are not restoring a remote log update
 		// that we haven't received a sig for.
@@ -2066,8 +2150,7 @@ func (lc *LightningChannel) restorePeerLocalUpdates(updates []channeldb.LogUpdat
 
 // restorePendingLocalUpdates restores the local log updates leading up to the
 // given pending remote commitment.
-func (lc *LightningChannel) restorePendingLocalUpdates(
-	pendingRemoteCommitDiff *channeldb.CommitDiff,
+func (lc *LightningChannel) restorePendingLocalUpdates(pendingRemoteCommitDiff *channeldb.CommitDiff,
 	pendingRemoteKeys *CommitmentKeyRing) error {
 
 	pendingCommit := pendingRemoteCommitDiff.Commitment
@@ -3243,9 +3326,17 @@ func (lc *LightningChannel) getUnsignedAckedUpdates() []channeldb.LogUpdate {
 			continue
 		}
 
+		// TODO(roasbeef): ignore all together if not yet locked in?
+
+		lc.log.Infof("unsigned unacked htlc: %v", spew.Sdump(pd))
+
 		logUpdate := channeldb.LogUpdate{
 			LogIndex: pd.LogIndex,
 		}
+
+		// TODO(roasbeef): need to filter that these items are locked
+		// in?
+		//  * otherwise can send up signing something we haven't acked?
 
 		// We'll map the type of the PaymentDescriptor to one of the
 		// four messages that it corresponds to.
@@ -3603,6 +3694,8 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig, []ch
 		return sig, htlcSigs, nil, err
 	}
 
+	lc.log.Infof("commit diff to chain: %v", spew.Sdump(commitDiff))
+
 	// TODO(roasbeef): check that one eclair bug
 	//  * need to retransmit on first state still?
 	//  * after initial reconnect
@@ -3769,6 +3862,7 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// revocation, but also initiate a state transition to re-sync
 		// them.
 		if lc.OweCommitment(true) {
+			lc.log.Debugf("SPECIAL CAAAASE")
 			commitSig, htlcSigs, _, err := lc.SignNextCommitment()
 			switch {
 
@@ -4079,8 +4173,8 @@ func genHtlcSigValidationJobs(localCommitmentView *commitment,
 
 			// Make sure there are more signatures left.
 			if i >= len(htlcSigs) {
-				return nil, fmt.Errorf("not enough HTLC " +
-					"signatures")
+				return nil, fmt.Errorf("not enough HTLC "+
+					"signatures: have %v want %v", len(htlcSigs), i)
 			}
 
 			// With the sighash generated, we'll also store the
@@ -4133,8 +4227,8 @@ func genHtlcSigValidationJobs(localCommitmentView *commitment,
 
 			// Make sure there are more signatures left.
 			if i >= len(htlcSigs) {
-				return nil, fmt.Errorf("not enough HTLC " +
-					"signatures")
+				return nil, fmt.Errorf("not enough HTLC "+
+					"signatures: have %v want %v", len(htlcSigs), i)
 			}
 
 			// With the sighash generated, we'll also store the
@@ -4306,6 +4400,9 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 			return spew.Sdump(localCommitmentView.txn)
 		}),
 	)
+
+	lc.log.Infof("remote update log recv new sig: ", spew.Sdump(lc.remoteUpdateLog))
+	lc.log.Infof("local update log recv new sig: ", spew.Sdump(lc.localUpdateLog))
 
 	// Construct the sighash of the commitment transaction corresponding to
 	// this newly proposed state update.
@@ -4524,6 +4621,9 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck, []c
 		return nil, nil, err
 	}
 
+	lc.log.Infof("after we revoke local update log: %v", spew.Sdump(lc.localUpdateLog))
+	lc.log.Infof("after we revoke remote update log: %v", spew.Sdump(lc.remoteUpdateLog))
+
 	lc.log.Tracef("state transition accepted: "+
 		"our_balance=%v, their_balance=%v, unsigned_acked_updates=%v",
 		chainTail.ourBalance,
@@ -4740,6 +4840,9 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	remoteMessageIndex := lc.remoteCommitChain.tip().ourMessageIndex
 	localMessageIndex := lc.localCommitChain.tail().ourMessageIndex
 
+	lc.log.Infof("remote update log after remote revoke: ", spew.Sdump(lc.remoteUpdateLog))
+	lc.log.Infof("local update log after remote revoke: ", spew.Sdump(lc.localUpdateLog))
+
 	for e := lc.localUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -4755,6 +4858,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			if pd.EntryType == Add {
 				continue
 			}
+
+			lc.log.Infof("saving update: %v", spew.Sdump(pd))
 
 			switch pd.EntryType {
 			case FeeUpdate:
@@ -4815,6 +4920,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		lc.localUpdateLog, lc.remoteUpdateLog, localChainTail,
 		remoteChainTail,
 	)
+
+	// TODO(roasbeef): compact logs first, then save items to disk?
 
 	remoteHTLCs := lc.channelState.RemoteCommitment.Htlcs
 

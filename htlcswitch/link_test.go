@@ -4867,6 +4867,8 @@ func TestChannelFail(t *testing.T) {
 	if err := alice.channel.ReceiveNewCommitment(sig, htlcSigs); err != nil {
 		t.Fatalf("err receiving commitment: %v", err)
 	}
+
+	// TODO(roasbeef): more updates, then Alice restarts
 }
 
 // TestChannelLinkCleanupSpuriousResponses tests that we properly cleanup

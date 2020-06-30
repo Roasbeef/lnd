@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -1445,6 +1446,12 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 				"updates: %v", err)
 		}
 
+		// Now that we've revoked our commitment, we can delete the set
+		// of updates we were keeping around only to be able to process
+		// their next signature properly (we just did that before we
+		// revoked here).
+		// return chanBucket.Delete(peerUnsignedAckedUpdatesKey)
+
 		// Persist the peer unsigned acked updates that are not included
 		// in our new commitment.
 		updateBytes := chanBucket.Get(peerUnsignedAckedUpdatesKey)
@@ -1457,12 +1464,16 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 
 		var validUpdates []LogUpdate
 
+		log.Infof("filtering out updates that aren't yet applied to our commitment")
 		for _, upd := range updates {
 			lIdx := upd.LogIndex
 
 			// Check if it's not on our local commitment
 			if lIdx >= newCommitment.LocalLogIndex {
 				validUpdates = append(validUpdates, upd)
+				log.Infof("keeping: %v", spew.Sdump(upd))
+			} else {
+				log.Infof("ditching: %v", spew.Sdump(upd))
 			}
 		}
 

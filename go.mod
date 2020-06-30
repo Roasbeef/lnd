@@ -14,6 +14,7 @@ require (
 	github.com/btcsuite/btcwallet/wallet/txrules v1.0.0
 	github.com/btcsuite/btcwallet/walletdb v1.3.3
 	github.com/btcsuite/btcwallet/wtxmgr v1.2.0
+	github.com/btcsuite/fastsha256 v0.0.0-20160815193821-637e65642941
 	github.com/coreos/etcd v3.3.22+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
@@ -67,6 +68,7 @@ require (
 	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
 	golang.org/x/net v0.0.0-20191002035440-2ec189313ef0
 	golang.org/x/time v0.0.0-20180412165947-fbb02b2291d2
+	google.golang.org/appengine v1.4.0
 	google.golang.org/grpc v1.24.0
 	gopkg.in/errgo.v1 v1.0.1 // indirect
 	gopkg.in/macaroon-bakery.v2 v2.0.1
