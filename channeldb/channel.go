@@ -1454,6 +1454,9 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 
 		r := bytes.NewReader(updateBytes)
 		updates, err := deserializeLogUpdates(r)
+		if err != nil {
+			return err
+		}
 
 		var validUpdates []LogUpdate
 
