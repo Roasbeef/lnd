@@ -179,6 +179,165 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 	}
 }
 
+// TestChannelUnsignedAckedFailure tests that a shutdown of Alice at a
+// certain point will cause her to not restore a settle in the remote update
+// log.
+//
+// The full state transition is:
+//
+// Alice                   Bob
+//         -----add----->
+//         -----sig----->
+//         <----rev------
+//         <----sig------
+//         -----rev----->
+//         <----settle---
+//         <----sig------
+//         -----rev----->
+//         -----sig-----X (does not reach Bob! Alice dies!)
+//
+//         -----sig----->
+//         <----rev------
+//         <----add------
+//         <----sig------ (Alice rejects this commitment)
+//
+func TestChannelUnsignedAckedFailure(t *testing.T) {
+	t.Parallel()
+
+	const chanAmt = btcutil.SatoshiPerBitcoin * 5
+	const chanReserve = btcutil.SatoshiPerBitcoin * 1
+	aliceLink, bobChannel, batchTicker, start, cleanUp, restore, err :=
+		newSingleLinkTestHarness(chanAmt, chanReserve)
+	if err != nil {
+		t.Fatalf("unable to create link: %v", err)
+	}
+	defer cleanUp()
+
+	alice := newPersistentLinkHarness(
+		t, aliceLink, nil, restore,
+	)
+
+	if err := start(); err != nil {
+		t.Fatalf("unable to start test harness: %v", err)
+	}
+
+	var (
+		coreLink  = aliceLink.(*channelLink)
+		aliceMsgs = coreLink.cfg.Peer.(*mockPeer).sentMsgs
+		registry  = coreLink.cfg.Registry.(*mockInvoiceRegistry)
+	)
+
+	registry.settleChan = make(chan lntypes.Hash)
+	coreLink.cfg.HodlMask = hodl.ExitSettle.Mask()
+
+	ctx := linkTestContext{
+		t:          t,
+		aliceLink:  aliceLink,
+		aliceMsgs:  aliceMsgs,
+		bobChannel: bobChannel,
+	}
+
+	htlc, inv := generateHtlcAndInvoice(t, 0)
+
+	// -----add----->
+	ctx.sendHtlcAliceToBob(0, htlc)
+	ctx.receiveHtlcAliceToBob()
+
+	// Strobe the batch ticker so Alice sends a CommitSig.
+	select {
+	case batchTicker <- time.Now():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("could not force commit sig")
+	}
+
+	// -----sig----->
+	ctx.receiveCommitSigAliceToBob(1)
+
+	// <----rev------
+	ctx.sendRevAndAckBobToAlice()
+
+	// <----sig------
+	ctx.sendCommitSigBobToAlice(1)
+
+	// -----rev----->
+	ctx.receiveRevAndAckAliceToBob()
+
+	// Bob settls the htlc as it is fully locked in as of the last
+	// revocation Bob received.
+	// <----settle---
+	ctx.sendSettleBobToAlice(uint64(0), *inv.Terms.PaymentPreimage)
+
+	// <----sig------
+	ctx.sendCommitSigBobToAlice(0)
+
+	// -----rev----->
+	ctx.receiveRevAndAckAliceToBob()
+
+	// Since Alice will immediately send out a CommitSig, we wait
+	// and pull it from the aliceMsgs channel. This lets us apply
+	// the CommitSig after restart.
+	// -----sig-----X
+	var msg lnwire.Message
+	select {
+	case msg = <-ctx.aliceMsgs:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("failed to receive CommitSig from Alice")
+	}
+
+	m, ok := msg.(*lnwire.CommitSig)
+	if !ok {
+		t.Fatalf("failed to receive CommitSig from Alice")
+	}
+
+	// Restart Alice. Upon startup, she will be missing Bob's settle
+	// from her remote update log.
+	<-time.After(5 * time.Second)
+
+	alice.restart(false)
+	ctx.aliceLink = alice.link
+	ctx.aliceMsgs = alice.msgs
+
+	<-time.After(5 * time.Second)
+
+	// -----sig----->
+	err = bobChannel.ReceiveNewCommitment(m.CommitSig, m.HtlcSigs)
+	if err != nil {
+		t.Fatalf("couldn't receive new commitment: %v", err)
+	}
+
+	// <----rev------
+	ctx.sendRevAndAckBobToAlice()
+
+	// We use ID 0 since this is an add Bob is sending.
+	h2, i2 := generateHtlcAndInvoice(t, 0)
+	if err := registry.AddInvoice(*i2, h2.PaymentHash); err != nil {
+		t.Fatalf("unable to add invoice to registry: %v", err)
+	}
+
+	// <----add------
+	ctx.sendHtlcBobToAlice(h2)
+
+	// Wait for the add to be pulled off of the mailbox queue before
+	// attempting to send over a signature.
+	<-time.After(5 * time.Second)
+
+	sig, htlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("failed to sign commitment: %v", err)
+	}
+
+	// Bob sends 1 sig covering the add he just sent.
+	if len(htlcSigs) != 1 {
+		t.Fatalf("expected 1 htlc sig, got %d instead",
+			len(htlcSigs))
+	}
+
+	err = alice.channel.ReceiveNewCommitment(sig, htlcSigs)
+	if err != nil {
+		t.Fatalf("failed to receive new commitment: %v", err)
+	}
+}
+
 // TestChannelLinkSingleHopPayment in this test we checks the interaction
 // between Alice and Bob within scope of one channel.
 func TestChannelLinkSingleHopPayment(t *testing.T) {
