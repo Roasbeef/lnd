@@ -179,34 +179,32 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 	}
 }
 
-// TestChannelUnsignedAckedFailure tests that a shutdown of Alice at a
-// certain point will cause her to not restore a settle in the remote update
-// log.
+// TestChannelLocalUnsignedUpdatesFailure checks that updates from the local
+// log are restored if the remote still hasn't sent us a signature covering
+// them for our commitment transaction.
 //
 // The full state transition is:
 //
-// Alice                   Bob
-//         -----add----->
-//         -----sig----->
-//         <----rev------
-//         <----sig------
-//         -----rev----->
-//         <----settle---
-//         <----sig------
-//         -----rev----->
-//         -----sig-----X (does not reach Bob! Alice dies!)
+// Alice                 Bob
+//        <----add-----
+//        <----sig-----
+//        -----rev---->
+//        -----sig---->
+//        <----rev-----
+//        ---settle--->
+//        -----sig---->
+//        <----rev-----
+//         *alice dies*
+//        <----sig-----
 //
-//         -----sig----->
-//         <----rev------
-//         <----add------
-//         <----sig------ (Alice rejects this commitment)
-//
-func TestChannelUnsignedAckedFailure(t *testing.T) {
+// Alice should reject the last signature since the settle is not restored
+// into the local update log and thus calculates Bob signature as invalid.
+func TestChannelLocalUnsignedUpdatesFailure(t *testing.T) {
 	t.Parallel()
 
 	const chanAmt = btcutil.SatoshiPerBitcoin * 5
 	const chanReserve = btcutil.SatoshiPerBitcoin * 1
-	aliceLink, bobChannel, batchTicker, start, cleanUp, restore, err :=
+	aliceLink, bobChannel, _, start, cleanUp, restore, err :=
 		newSingleLinkTestHarness(chanAmt, chanReserve)
 	if err != nil {
 		t.Fatalf("unable to create link: %v", err)
@@ -228,8 +226,6 @@ func TestChannelUnsignedAckedFailure(t *testing.T) {
 	)
 
 	registry.settleChan = make(chan lntypes.Hash)
-	coreLink.cfg.HodlMask = hodl.ExitSettle.Mask()
-
 	ctx := linkTestContext{
 		t:          t,
 		aliceLink:  aliceLink,
@@ -332,9 +328,55 @@ func TestChannelUnsignedAckedFailure(t *testing.T) {
 			len(htlcSigs))
 	}
 
+	// <----add-----
+	ctx.sendHtlcBobToAlice(htlc)
+
+	// <----sig-----
+	ctx.sendCommitSigBobToAlice(1)
+
+	// -----rev---->
+	ctx.receiveRevAndAckAliceToBob()
+
+	// -----sig---->
+	ctx.receiveCommitSigAliceToBob(1)
+
+	// <----rev-----
+	ctx.sendRevAndAckBobToAlice()
+
+	select {
+	case <-registry.settleChan:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("exit hop notification not received")
+	}
+
+	registry.SettleHodlInvoice(*preimage)
+
+	// ---settle--->
+	ctx.receiveSettleAliceToBob()
+
+	// -----sig---->
+	ctx.receiveCommitSigAliceToBob(0)
+
+	// <----rev-----
+	ctx.sendRevAndAckBobToAlice()
+
+	<-time.After(5 * time.Second)
+
+	alice.restart(false)
+	ctx.aliceLink = alice.link
+	ctx.aliceMsgs = alice.msgs
+
+	<-time.After(5 * time.Second)
+
+	// <----sig-----
+	sig, htlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("error signing commitment: %v", err)
+	}
+
 	err = alice.channel.ReceiveNewCommitment(sig, htlcSigs)
 	if err != nil {
-		t.Fatalf("failed to receive new commitment: %v", err)
+		t.Fatalf("unable to receive commitment: %v", err)
 	}
 }
 
