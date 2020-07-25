@@ -94,6 +94,7 @@ func (c *Error) Error() string {
 // This is part of the lnwire.Message interface.
 func (c *Error) Decode(r io.Reader, pver uint32) error {
 	return ReadElements(r,
+		pver,
 		&c.ChanID,
 		&c.Data,
 	)
@@ -105,6 +106,7 @@ func (c *Error) Decode(r io.Reader, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (c *Error) Encode(w io.Writer, pver uint32) error {
 	return WriteElements(w,
+		pver,
 		c.ChanID,
 		c.Data,
 	)
@@ -123,8 +125,7 @@ func (c *Error) MsgType() MessageType {
 //
 // This is part of the lnwire.Message interface.
 func (c *Error) MaxPayloadLength(uint32) uint32 {
-	// 32 + 2 + 65501
-	return 65535
+	return MaxMsgBody
 }
 
 // isASCII is a helper method that checks whether all bytes in `data` would be

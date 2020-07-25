@@ -16,6 +16,11 @@ type UpdateFee struct {
 	// TODO(halseth): make SatPerKWeight when fee estimation is moved to
 	// own package. Currently this will cause an import cycle.
 	FeePerKw uint32
+
+	// ExtraData is the set of data that was appended to this message to
+	// fill out the full maximum transport message size. These fields can
+	// be used to specify optional data such as custom TLV fields.
+	ExtraData ExtraOpaqueData
 }
 
 // NewUpdateFee creates a new UpdateFee message.
@@ -36,8 +41,10 @@ var _ Message = (*UpdateFee)(nil)
 // This is part of the lnwire.Message interface.
 func (c *UpdateFee) Decode(r io.Reader, pver uint32) error {
 	return ReadElements(r,
+		pver,
 		&c.ChanID,
 		&c.FeePerKw,
+		&c.ExtraData,
 	)
 }
 
@@ -47,8 +54,10 @@ func (c *UpdateFee) Decode(r io.Reader, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (c *UpdateFee) Encode(w io.Writer, pver uint32) error {
 	return WriteElements(w,
+		pver,
 		c.ChanID,
 		c.FeePerKw,
+		c.ExtraData,
 	)
 }
 
@@ -65,8 +74,7 @@ func (c *UpdateFee) MsgType() MessageType {
 //
 // This is part of the lnwire.Message interface.
 func (c *UpdateFee) MaxPayloadLength(uint32) uint32 {
-	// 32 + 4
-	return 36
+	return MaxMsgBody
 }
 
 // TargetChanID returns the channel id of the link for which this message is

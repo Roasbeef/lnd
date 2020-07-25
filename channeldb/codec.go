@@ -180,7 +180,10 @@ func WriteElement(w io.Writer, element interface{}) error {
 
 	case lnwire.Message:
 		var msgBuf bytes.Buffer
-		if _, err := lnwire.WriteMessage(&msgBuf, e, 0); err != nil {
+		_, err := lnwire.WriteMessage(
+			&msgBuf, e, lnwire.ProtocolVersionTLV,
+		)
+		if err != nil {
 			return err
 		}
 
@@ -190,7 +193,6 @@ func WriteElement(w io.Writer, element interface{}) error {
 		}
 
 		if _, err := w.Write(msgBuf.Bytes()); err != nil {
-			return err
 		}
 
 	case ChannelStatus:
@@ -411,7 +413,9 @@ func ReadElement(r io.Reader, element interface{}) error {
 		}
 
 		msgReader := io.LimitReader(r, int64(msgLen))
-		msg, err := lnwire.ReadMessage(msgReader, 0)
+		msg, err := lnwire.ReadMessage(
+			msgReader, lnwire.ProtocolVersionTLV,
+		)
 		if err != nil {
 			return err
 		}

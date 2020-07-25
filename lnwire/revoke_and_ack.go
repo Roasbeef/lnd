@@ -30,11 +30,18 @@ type RevokeAndAck struct {
 	// create the proper revocation key used within the commitment
 	// transaction.
 	NextRevocationKey *btcec.PublicKey
+
+	// ExtraData is the set of data that was appended to this message to
+	// fill out the full maximum transport message size. These fields can
+	// be used to specify optional data such as custom TLV fields.
+	ExtraData ExtraOpaqueData
 }
 
 // NewRevokeAndAck creates a new RevokeAndAck message.
 func NewRevokeAndAck() *RevokeAndAck {
-	return &RevokeAndAck{}
+	return &RevokeAndAck{
+		ExtraData: make([]byte, 0),
+	}
 }
 
 // A compile time check to ensure RevokeAndAck implements the lnwire.Message
@@ -47,9 +54,11 @@ var _ Message = (*RevokeAndAck)(nil)
 // This is part of the lnwire.Message interface.
 func (c *RevokeAndAck) Decode(r io.Reader, pver uint32) error {
 	return ReadElements(r,
+		pver,
 		&c.ChanID,
 		c.Revocation[:],
 		&c.NextRevocationKey,
+		&c.ExtraData,
 	)
 }
 
@@ -59,9 +68,11 @@ func (c *RevokeAndAck) Decode(r io.Reader, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (c *RevokeAndAck) Encode(w io.Writer, pver uint32) error {
 	return WriteElements(w,
+		pver,
 		c.ChanID,
 		c.Revocation[:],
 		c.NextRevocationKey,
+		c.ExtraData,
 	)
 }
 
@@ -78,8 +89,7 @@ func (c *RevokeAndAck) MsgType() MessageType {
 //
 // This is part of the lnwire.Message interface.
 func (c *RevokeAndAck) MaxPayloadLength(uint32) uint32 {
-	// 32 + 32 + 33
-	return 97
+	return MaxMsgBody
 }
 
 // TargetChanID returns the channel id of the link for which this message is

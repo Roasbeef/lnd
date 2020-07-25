@@ -30,7 +30,7 @@ func TestReplyChannelRangeUnsorted(t *testing.T) {
 			var req2 ReplyChannelRange
 			err = req2.Decode(bytes.NewReader(b.Bytes()), 0)
 			if _, ok := err.(ErrUnsortedSIDs); !ok {
-				t.Fatalf("expected ErrUnsortedSIDs, got: %T",
+				t.Fatalf("expected ErrUnsortedSIDs, got: %v",
 					err)
 			}
 		})
@@ -67,13 +67,12 @@ func TestReplyChannelRangeEmpty(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			req := ReplyChannelRange{
-				QueryChannelRange: QueryChannelRange{
-					FirstBlockHeight: 1,
-					NumBlocks:        2,
-				},
-				Complete:     1,
-				EncodingType: test.encType,
-				ShortChanIDs: nil,
+				FirstBlockHeight: 1,
+				NumBlocks:        2,
+				Complete:         1,
+				EncodingType:     test.encType,
+				ShortChanIDs:     nil,
+				ExtraData:        make([]byte, 0),
 			}
 
 			// First decode the hex string in the test case into a
@@ -81,7 +80,9 @@ func TestReplyChannelRangeEmpty(t *testing.T) {
 			// identical to the one created above.
 			var req2 ReplyChannelRange
 			b, _ := hex.DecodeString(test.encodedHex)
-			err := req2.Decode(bytes.NewReader(b), 0)
+			err := req2.Decode(
+				bytes.NewReader(b), ProtocolVersionTLV,
+			)
 			if err != nil {
 				t.Fatalf("unable to decode req: %v", err)
 			}
@@ -94,7 +95,7 @@ func TestReplyChannelRangeEmpty(t *testing.T) {
 			// request created above, and assert that it matches
 			// the raw byte encoding.
 			var b2 bytes.Buffer
-			err = req.Encode(&b2, 0)
+			err = req.Encode(&b2, ProtocolVersionTLV)
 			if err != nil {
 				t.Fatalf("unable to encode req: %v", err)
 			}

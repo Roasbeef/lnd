@@ -464,7 +464,10 @@ func TestMigrateGossipMessageStoreKeys(t *testing.T) {
 	// Construct the message which we'll use to test the migration, along
 	// with its old and new key formats.
 	shortChanID := lnwire.ShortChannelID{BlockHeight: 10}
-	msg := &lnwire.AnnounceSignatures{ShortChannelID: shortChanID}
+	msg := &lnwire.AnnounceSignatures{
+		ShortChannelID:  shortChanID,
+		ExtraOpaqueData: make([]byte, 0),
+	}
 
 	var oldMsgKey [33 + 8]byte
 	copy(oldMsgKey[:33], pubKey.SerializeCompressed())
@@ -526,7 +529,9 @@ func TestMigrateGossipMessageStoreKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		gotMsg, err := lnwire.ReadMessage(bytes.NewReader(rawMsg), 0)
+		gotMsg, err := lnwire.ReadMessage(
+			bytes.NewReader(rawMsg), lnwire.ProtocolVersionLegacy,
+		)
 		if err != nil {
 			t.Fatalf("unable to deserialize raw message: %v", err)
 		}

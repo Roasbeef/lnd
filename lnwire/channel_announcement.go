@@ -3,7 +3,6 @@ package lnwire
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 )
@@ -56,7 +55,7 @@ type ChannelAnnouncement struct {
 	// properly validate the set of signatures that cover these new fields,
 	// and ensure we're able to make upgrades to the network in a forwards
 	// compatible manner.
-	ExtraOpaqueData []byte
+	ExtraOpaqueData ExtraOpaqueData
 }
 
 // A compile time check to ensure ChannelAnnouncement implements the
@@ -68,7 +67,8 @@ var _ Message = (*ChannelAnnouncement)(nil)
 //
 // This is part of the lnwire.Message interface.
 func (a *ChannelAnnouncement) Decode(r io.Reader, pver uint32) error {
-	err := ReadElements(r,
+	return ReadElements(r,
+		pver,
 		&a.NodeSig1,
 		&a.NodeSig2,
 		&a.BitcoinSig1,
@@ -80,24 +80,8 @@ func (a *ChannelAnnouncement) Decode(r io.Reader, pver uint32) error {
 		&a.NodeID2,
 		&a.BitcoinKey1,
 		&a.BitcoinKey2,
+		&a.ExtraOpaqueData,
 	)
-	if err != nil {
-		return err
-	}
-
-	// Now that we've read out all the fields that we explicitly know of,
-	// we'll collect the remainder into the ExtraOpaqueData field. If there
-	// aren't any bytes, then we'll snip off the slice to avoid carrying
-	// around excess capacity.
-	a.ExtraOpaqueData, err = ioutil.ReadAll(r)
-	if err != nil {
-		return err
-	}
-	if len(a.ExtraOpaqueData) == 0 {
-		a.ExtraOpaqueData = nil
-	}
-
-	return nil
 }
 
 // Encode serializes the target ChannelAnnouncement into the passed io.Writer
@@ -106,6 +90,7 @@ func (a *ChannelAnnouncement) Decode(r io.Reader, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (a *ChannelAnnouncement) Encode(w io.Writer, pver uint32) error {
 	return WriteElements(w,
+		pver,
 		a.NodeSig1,
 		a.NodeSig2,
 		a.BitcoinSig1,
@@ -134,7 +119,7 @@ func (a *ChannelAnnouncement) MsgType() MessageType {
 //
 // This is part of the lnwire.Message interface.
 func (a *ChannelAnnouncement) MaxPayloadLength(pver uint32) uint32 {
-	return 65533
+	return MaxMsgBody
 }
 
 // DataToSign is used to retrieve part of the announcement message which should
@@ -143,6 +128,10 @@ func (a *ChannelAnnouncement) DataToSign() ([]byte, error) {
 	// We should not include the signatures itself.
 	var w bytes.Buffer
 	err := WriteElements(&w,
+		// We always use the modern protocol version here as we always
+		// need to include any optional data in the signature digest
+		// for forwards compatibility.
+		ProtocolVersionTLV,
 		a.Features,
 		a.ChainHash[:],
 		a.ShortChannelID,

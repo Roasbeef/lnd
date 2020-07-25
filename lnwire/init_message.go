@@ -20,6 +20,11 @@ type Init struct {
 	// message, any GlobalFeatures should be merged into the unified
 	// Features field.
 	Features *RawFeatureVector
+
+	// ExtraData is the set of data that was appended to this message to
+	// fill out the full maximum transport message size. These fields can
+	// be used to specify optional data such as custom TLV fields.
+	ExtraData ExtraOpaqueData
 }
 
 // NewInitMessage creates new instance of init message object.
@@ -27,6 +32,7 @@ func NewInitMessage(gf *RawFeatureVector, f *RawFeatureVector) *Init {
 	return &Init{
 		GlobalFeatures: gf,
 		Features:       f,
+		ExtraData:      make([]byte, 0),
 	}
 }
 
@@ -40,8 +46,10 @@ var _ Message = (*Init)(nil)
 // This is part of the lnwire.Message interface.
 func (msg *Init) Decode(r io.Reader, pver uint32) error {
 	return ReadElements(r,
+		pver,
 		&msg.GlobalFeatures,
 		&msg.Features,
+		&msg.ExtraData,
 	)
 }
 
@@ -51,8 +59,10 @@ func (msg *Init) Decode(r io.Reader, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (msg *Init) Encode(w io.Writer, pver uint32) error {
 	return WriteElements(w,
+		pver,
 		msg.GlobalFeatures,
 		msg.Features,
+		msg.ExtraData,
 	)
 }
 
@@ -69,5 +79,5 @@ func (msg *Init) MsgType() MessageType {
 //
 // This is part of the lnwire.Message interface.
 func (msg *Init) MaxPayloadLength(uint32) uint32 {
-	return 2 + 2 + maxAllowedSize + 2 + maxAllowedSize
+	return MaxMsgBody
 }
