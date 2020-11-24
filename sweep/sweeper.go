@@ -1171,6 +1171,8 @@ func (s *UtxoSweeper) sweep(inputs inputSet, feeRate chainfee.SatPerKWeight,
 		return fmt.Errorf("create sweep tx: %v", err)
 	}
 
+	// TODO(roasbeef): tx policy check
+
 	// Add tx before publication, so that we will always know that a spend
 	// by this tx is ours. Otherwise if the publish doesn't return, but did
 	// publish, we loose track of this tx. Even republication on startup

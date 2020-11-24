@@ -97,6 +97,8 @@ func (f *FullIntent) CompileFundingTx(extraInputs []*wire.TxIn,
 	fundingTx.AddTxOut(fundingOutput)
 	txsort.InPlaceSort(fundingTx)
 
+	// TODO(roasbeef): policy txn policy check
+
 	// Now that the funding tx has been fully assembled, we'll locate the
 	// index of the funding output so we can create our final channel
 	// point.
