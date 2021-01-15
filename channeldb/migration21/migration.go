@@ -46,17 +46,33 @@ var (
 // CommitDiff struct, ChannelCloseSummary, LogUpdates, and also the
 // networkResult struct as well.
 func MigrateDatabaseWireMessages(tx kvdb.RwTx) error {
-	openChanBucket := tx.ReadWriteBucket(openChannelBucket)
-	if openChanBucket == nil {
-		return nil
-	}
-
 	// The migration will proceed in three phases: we'll need to update any
 	// pending commit diffs, then any unsigned acked updates for all open
 	// channels, then finally we'll need to update all the current
 	// stored network results for payments in the switch.
 	//
 	// In this phase, we'll migrate the open channel data.
+	if err := migrateOpenChanBucket(tx); err != nil {
+		return err
+	}
+
+	// Next, we'll update all the present close channel summaries as well.
+	if err := migrateCloseChanSummaries(tx); err != nil {
+		return err
+	}
+
+	// Finally, we'll update the pending network results as well.
+	return migrateNetworkResults(tx)
+}
+
+func migrateOpenChanBucket(tx kvdb.RwTx) error {
+	openChanBucket := tx.ReadWriteBucket(openChannelBucket)
+
+	// If no bucket is found, we can exit early.
+	if openChanBucket == nil {
+		return nil
+	}
+
 	type channelPath struct {
 		nodePub   []byte
 		chainHash []byte
@@ -184,18 +200,23 @@ func MigrateDatabaseWireMessages(tx kvdb.RwTx) error {
 		}
 	}
 
-	// Next, we'll update all the present close channel summaries as well.
+	return nil
+}
+
+func migrateCloseChanSummaries(tx kvdb.RwTx) error {
+	closedChanBucket := tx.ReadWriteBucket(closedChannelBucket)
+
+	// Exit early if bucket is not found.
+	if closedChannelBucket == nil {
+		return nil
+	}
+
 	type closedChan struct {
 		chanKey      []byte
 		summaryBytes []byte
 	}
 	var closedChans []closedChan
-
-	closedChanBucket := tx.ReadWriteBucket(closedChannelBucket)
-	if closedChannelBucket == nil {
-		return fmt.Errorf("no closed channels found")
-	}
-	err = closedChanBucket.ForEach(func(k, v []byte) error {
+	err := closedChanBucket.ForEach(func(k, v []byte) error {
 		closedChans = append(closedChans, closedChan{
 			chanKey:      k,
 			summaryBytes: v,
@@ -229,9 +250,13 @@ func MigrateDatabaseWireMessages(tx kvdb.RwTx) error {
 			return err
 		}
 	}
+	return nil
+}
 
-	// Finally, we'll update the pending network results as well.
+func migrateNetworkResults(tx kvdb.RwTx) error {
 	networkResults := tx.ReadWriteBucket(networkResultStoreBucketKey)
+
+	// Exit early if bucket is not found.
 	if networkResults == nil {
 		return nil
 	}
@@ -240,7 +265,7 @@ func MigrateDatabaseWireMessages(tx kvdb.RwTx) error {
 	// we'll first grab all the keys we need to migrate in one loop, then
 	// update them all in another loop.
 	var netResultsToMigrate [][2][]byte
-	err = networkResults.ForEach(func(k, v []byte) error {
+	err := networkResults.ForEach(func(k, v []byte) error {
 		netResultsToMigrate = append(netResultsToMigrate, [2][]byte{
 			k, v,
 		})
@@ -271,6 +296,5 @@ func MigrateDatabaseWireMessages(tx kvdb.RwTx) error {
 			return err
 		}
 	}
-
 	return nil
 }
