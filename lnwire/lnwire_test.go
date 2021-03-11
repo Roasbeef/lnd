@@ -552,6 +552,8 @@ func TestLightningWireProtocol(t *testing.T) {
 				}
 			}
 
+			req.ChanType = ChannelType(r.Int31())
+
 			v[0] = reflect.ValueOf(*req)
 		},
 		MsgRevokeAndAck: func(v []reflect.Value, r *rand.Rand) {
@@ -570,6 +572,8 @@ func TestLightningWireProtocol(t *testing.T) {
 				t.Fatalf("unable to generate key: %v", err)
 				return
 			}
+
+			req.ChanType = ChannelType(r.Int31())
 
 			v[0] = reflect.ValueOf(*req)
 		},

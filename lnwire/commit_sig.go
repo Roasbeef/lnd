@@ -35,6 +35,13 @@ type CommitSig struct {
 	// transaction should be signed.
 	HtlcSigs []Sig
 
+	// ChanType is the explicit channel type that informs what type fo
+	// commitment this signature covers. This is typically the same as the
+	// same as the type used to open the channel. This value can change (to
+	// upgrade channel types), but *only* if an UpdateCommit message is
+	// sent first by both sides.
+	ChanType ChannelType
+
 	// ExtraData is the set of data that was appended to this message to
 	// fill out the full maximum transport message size. These fields can
 	// be used to specify optional data such as custom TLV fields.
@@ -57,12 +64,30 @@ var _ Message = (*CommitSig)(nil)
 //
 // This is part of the lnwire.Message interface.
 func (c *CommitSig) Decode(r io.Reader, pver uint32) error {
-	return ReadElements(r,
+	err := ReadElements(r,
 		&c.ChanID,
 		&c.CommitSig,
 		&c.HtlcSigs,
-		&c.ExtraData,
 	)
+	if err != nil {
+		return err
+	}
+
+	var tlvRecords ExtraOpaqueData
+	if err := ReadElements(r, &tlvRecords); err != nil {
+		return err
+	}
+
+	_, err = tlvRecords.ExtractRecords(
+		&c.ChanType,
+	)
+	if err != nil {
+		return err
+	}
+
+	c.ExtraData = tlvRecords
+
+	return nil
 }
 
 // Encode serializes the target CommitSig into the passed io.Writer
@@ -70,11 +95,36 @@ func (c *CommitSig) Decode(r io.Reader, pver uint32) error {
 //
 // This is part of the lnwire.Message interface.
 func (c *CommitSig) Encode(w io.Writer, pver uint32) error {
+	var tlvRecords ExtraOpaqueData
+
+	// If the set of extra data is already populated, then we'll write that
+	// out as is, since we may have read this from disk and want to ensure
+	// we write out the exact same bytes.
+	switch {
+	case len(c.ExtraData) != 0:
+		tlvRecords = c.ExtraData
+
+	// Otherwise, we're encoding this message a new, so we don't need to
+	// keep track of any existing opauqe bytes.
+	default:
+		// Pack in the series of TLV records into this message. The
+		// order we pass them in doesn't matter, as the method will
+		// ensure that things are all properly sorted.
+		err := tlvRecords.PackRecords(
+			&c.ChanType,
+		)
+		if err != nil {
+			return err
+		}
+
+		c.ExtraData = tlvRecords
+	}
+
 	return WriteElements(w,
 		c.ChanID,
 		c.CommitSig,
 		c.HtlcSigs,
-		c.ExtraData,
+		tlvRecords,
 	)
 }
 
