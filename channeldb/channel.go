@@ -31,6 +31,12 @@ const (
 	AbsoluteThawHeightThreshold uint32 = 500000
 )
 
+const (
+	// chanTypeTlvRecord is the type of the new channel type TLV record
+	// that is stored at the end of the ChannelCommitment struct on disk.
+	chanTypeTlvRecord = 0
+)
+
 var (
 	// closedChannelBucket stores summarization information concerning
 	// previously open, but now closed channels.
@@ -126,6 +132,10 @@ var (
 	//
 	// TODO(roasbeef): rename to commit chain?
 	commitDiffKey = []byte("commit-diff-key")
+
+	// commitDiffExtKey is a key that's used to store TLV extensions to the
+	// contents of the existing commitDiffKey.
+	commitDiffExtKey = []byte("commit-diff-ext")
 
 	// revocationLogBucket is dedicated for storing the necessary delta
 	// state between channel updates required to re-construct a past state
@@ -2164,7 +2174,20 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		if err := serializeCommitDiff(&b2, diff); err != nil {
 			return err
 		}
-		return chanBucket.Put(commitDiffKey, b2.Bytes())
+		if err := chanBucket.Put(commitDiffKey, b2.Bytes()); err != nil {
+			return err
+		}
+
+		// Finally, we'll write any commitment diff extensions that may
+		// have been added over time.
+		var xb bytes.Buffer
+		err = writeChanCommitTLVRecords(&xb, &diff.Commitment)
+		if err != nil {
+			return err
+		}
+
+		return chanBucket.Put(commitDiffExtKey, xb.Bytes())
+
 	}, func() {})
 }
 
@@ -2195,6 +2218,28 @@ func (c *OpenChannel) RemoteCommitChainTip() (*CommitDiff, error) {
 
 		tipReader := bytes.NewReader(tipBytes)
 		dcd, err := deserializeCommitDiff(tipReader)
+		if err != nil {
+			return err
+		}
+
+		extTipBytes := chanBucket.Get(commitDiffExtKey)
+
+		// If there're no extension commit diff bytes, then that's OK
+		// as this may be an older commit diff that didn't yet use the
+		// new TLV space.
+		if extTipBytes == nil {
+			cd = dcd
+			return nil
+		}
+
+		// Otherwise, parse it our as normal and apply it to commitment
+		// (diff).
+		//
+		// TODO(roasbeef): should also operate on the diff to denote
+		// that it's a commitment switch, may be useful for recovery?
+		err = readChanCommitTLVRecords(
+			bytes.NewReader(extTipBytes), &dcd.Commitment,
+		)
 		if err != nil {
 			return err
 		}
