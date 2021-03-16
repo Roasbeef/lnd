@@ -310,6 +310,7 @@ func createTestChannelState(t *testing.T, cdb *DB) *OpenChannel {
 			FeePerKw:      btcutil.Amount(5000),
 			CommitTx:      channels.TestFundingTx,
 			CommitSig:     bytes.Repeat([]byte{1}, 71),
+			ChanType:      10,
 		},
 		RemoteCommitment: ChannelCommitment{
 			CommitHeight:  0,
@@ -319,6 +320,7 @@ func createTestChannelState(t *testing.T, cdb *DB) *OpenChannel {
 			FeePerKw:      btcutil.Amount(5000),
 			CommitTx:      channels.TestFundingTx,
 			CommitSig:     bytes.Repeat([]byte{1}, 71),
+			ChanType:      10,
 		},
 		NumConfsRequired:        4,
 		RemoteCurrentRevocation: privKey.PubKey(),
@@ -598,6 +600,7 @@ func TestChannelStateTransition(t *testing.T) {
 		CommitTx:        newTx,
 		CommitSig:       newSig,
 		Htlcs:           htlcs,
+		ChanType:        10,
 	}
 
 	// First update the local node's broadcastable state and also add a

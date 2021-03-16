@@ -3355,6 +3355,8 @@ func putChanInfo(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
 		return err
 	}
 
+	// TODO(roasbeef): can append byte to chanInfo key later for them
+	// commitments require all new params, similar config above
 	if err := chanBucket.Put(chanInfoKey, w.Bytes()); err != nil {
 		return err
 	}
@@ -3783,7 +3785,19 @@ func fetchChannelLogEntry(log kvdb.RBucket,
 	}
 
 	commitReader := bytes.NewReader(commitBytes)
-	return deserializeChanCommit(commitReader)
+	chanCommit, err := deserializeChanCommit(commitReader)
+	if err != nil {
+		return ChannelCommitment{}, nil
+	}
+
+	err = readChanCommitTLVRecords(
+		commitReader, &chanCommit,
+	)
+	if err != nil {
+		return ChannelCommitment{}, err
+	}
+
+	return chanCommit, nil
 }
 
 func fetchThawHeight(chanBucket kvdb.RBucket) (uint32, error) {
