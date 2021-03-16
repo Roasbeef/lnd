@@ -3,10 +3,12 @@ package lnwire
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"io"
 	"math"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/tlv"
 )
 
 const (
@@ -16,6 +18,15 @@ const (
 	// during the funding workflow. Funding transaction with more outputs
 	// than this are considered invalid within the protocol.
 	MaxFundingTxOutputs = math.MaxUint16
+)
+
+const (
+	// ChannelIDType is the number of the record used to encode the channel
+	// ID type across all messages.
+	//
+	// TODO(roasbeef): should technically be scoped to the msg itself, can
+	// add a higher level function to specify the delivery addr type...
+	ChannelIDType = 2022
 )
 
 // ChannelID is a series of 32-bytes that uniquely identifies all channels
@@ -88,4 +99,62 @@ func (c ChannelID) IsChanPoint(op *wire.OutPoint) bool {
 	candidateCid := NewChanIDFromOutPoint(op)
 
 	return candidateCid == c
+}
+
+// eChanID is a custom TLV encoder for the ChannelID record.
+//
+// TODO(roasbeef): can just use th eprimitive type here?
+func eChanID(w io.Writer, val interface{}, buf *[8]byte) error {
+	if v, ok := val.(*ChannelID); ok {
+		cid := (*[32]byte)(v)
+		return tlv.EBytes32(w, cid, buf)
+	}
+	return tlv.NewTypeForEncodingErr(val, "lnwire.ChannelID")
+}
+
+// dChanID is a custom TLV decode for the ChannelID record.
+func dChanID(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
+	if v, ok := val.(*ChannelID); ok {
+		/*var cid [32]byte
+		err := tlv.DBytes32(r, &cid, buf, l)
+		if err != nil {
+			return err
+		}
+		*v = ChannelID(cid)*/
+
+		err := tlv.DBytes32(r, (*[32]byte)(v), buf, l)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	return tlv.NewTypeForEncodingErr(val, "lnwire.ChannelType")
+}
+
+// Record returns a TLV record that can be used to encode the Channel ID field
+// address within the ExtraData TLV stream.
+func (c *ChannelID) Record() tlv.Record {
+
+	return tlv.MakeStaticRecord(
+		ChannelIDType, c, 32, eChanID, dChanID,
+	)
+}
+
+// recordScoper...
+type recordScoper struct {
+	cid *ChannelID
+
+	recordType tlv.Type
+}
+
+func (r *recordScoper) Record() tlv.Record {
+	return tlv.MakePrimitiveRecord(r.recordType, r.cid)
+}
+
+func (c *ChannelID) ScopedRecord(scopedType tlv.Type) *recordScoper {
+	return &recordScoper{
+		cid:        c,
+		recordType: scopedType,
+	}
 }

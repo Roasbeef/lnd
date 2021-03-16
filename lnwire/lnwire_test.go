@@ -855,6 +855,19 @@ func TestLightningWireProtocol(t *testing.T) {
 
 			v[0] = reflect.ValueOf(req)
 		},
+		MsgCommitUpdate: func(v []reflect.Value, r *rand.Rand) {
+			req := CommitUpdate{
+				NewChanType: ChannelType(r.Int31()),
+				ExtraData:   make([]byte, 0),
+			}
+
+			if _, err := rand.Read(req.ChanID[:]); err != nil {
+				t.Fatalf("unable to read chan type: %v", err)
+				return
+			}
+
+			v[0] = reflect.ValueOf(req)
+		},
 	}
 
 	// With the above types defined, we'll now generate a slice of
@@ -1032,6 +1045,12 @@ func TestLightningWireProtocol(t *testing.T) {
 		{
 			msgType: MsgReplyChannelRange,
 			scenario: func(m ReplyChannelRange) bool {
+				return mainScenario(&m)
+			},
+		},
+		{
+			msgType: MsgCommitUpdate,
+			scenario: func(m CommitUpdate) bool {
 				return mainScenario(&m)
 			},
 		},

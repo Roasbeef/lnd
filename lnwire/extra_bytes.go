@@ -54,8 +54,11 @@ func (e *ExtraOpaqueData) PackRecords(recordProducers ...tlv.RecordProducer) err
 	// First, assemble all the records passed in in series.
 	records := make([]tlv.Record, 0, len(recordProducers))
 	for _, producer := range recordProducers {
+		producer := producer
 		records = append(records, producer.Record())
 	}
+
+	// TODO(roasbeef: sorting isn't working?
 
 	// Ensure that the set of records are sorted before we encode them into
 	// the stream, to ensure they're canonical.

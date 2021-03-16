@@ -45,6 +45,7 @@ const (
 	MsgUpdateFee                           = 134
 	MsgUpdateFailMalformedHTLC             = 135
 	MsgChannelReestablish                  = 136
+	MsgCommitUpdate                        = 137
 	MsgChannelAnnouncement                 = 256
 	MsgNodeAnnouncement                    = 257
 	MsgChannelUpdate                       = 258
@@ -115,6 +116,8 @@ func (t MessageType) String() string {
 		return "ReplyChannelRange"
 	case MsgGossipTimestampRange:
 		return "GossipTimestampRange"
+	case MsgCommitUpdate:
+		return "CommitUpdate"
 	default:
 		return "<unknown>"
 	}
@@ -216,6 +219,8 @@ func makeEmptyMessage(msgType MessageType) (Message, error) {
 		msg = &ReplyChannelRange{}
 	case MsgGossipTimestampRange:
 		msg = &GossipTimestampRange{}
+	case MsgCommitUpdate:
+		msg = &CommitUpdate{}
 	default:
 		return nil, &UnknownMessage{msgType}
 	}
