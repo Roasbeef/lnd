@@ -349,12 +349,16 @@ func NewChannelReservation(capacity, localFundingAmt btcutil.Amount,
 				RemoteBalance: theirBalance,
 				FeePerKw:      btcutil.Amount(commitFeePerKw),
 				CommitFee:     commitFee,
+				// TODO(roasbeef): use diff chan type here that
+				// maps to wire?
+				ChanType: chanType,
 			},
 			RemoteCommitment: channeldb.ChannelCommitment{
 				LocalBalance:  ourBalance,
 				RemoteBalance: theirBalance,
 				FeePerKw:      btcutil.Amount(commitFeePerKw),
 				CommitFee:     commitFee,
+				ChanType:      chanType,
 			},
 			ThawHeight: thawHeight,
 			Db:         wallet.Cfg.Database,
