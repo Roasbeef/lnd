@@ -82,6 +82,16 @@ var (
 	// party.
 	chanCommitmentKey = []byte("chan-commitment-key")
 
+	// chanCommitExtKey is a key used to access any extension TLV records
+	// that have been tacked onto the end of the normal serialized
+	// commitment. Similar to the chanCommitmentKey, a 0 or 1 is appended
+	// to the end of the key in order to denote a local or remote
+	// commitment.
+	//
+	// TODO(roasbeef): also use a 2 to denote the remote pending commitment
+	// as well?
+	chanCommitExtKey = []byte("chan-commit-ext-key")
+
 	// unsignedAckedUpdatesKey is an entry in the channel bucket that
 	// contains the remote updates that we have acked, but not yet signed
 	// for in one of our remote commits.
@@ -466,6 +476,12 @@ type ChannelCommitment struct {
 	// commitment height.
 	Htlcs []HTLC
 
+	// ChanType is the channel type of this current commitment. This is
+	// stored on this level as it's possible that an active channel has two
+	// *distinct* commitment types due to the existence of dynamic
+	// commitments.
+	ChanType ChannelType
+
 	// TODO(roasbeef): pending commit pointer?
 	//  * lets just walk through
 }
@@ -583,6 +599,9 @@ func (c ChannelStatus) String() string {
 // "time-travel" to a prior state.
 type OpenChannel struct {
 	// ChanType denotes which type of channel this is.
+	//
+	// TODO(roasbeef): should always be swapped in to be the type of the
+	// current lowest unrevoked commitment
 	ChanType ChannelType
 
 	// ChainHash is a hash which represents the blockchain that this
@@ -1929,6 +1948,9 @@ type CommitDiff struct {
 	// settles and fails from the forwarding packages of other channels,
 	// such that they will not be reforwarded internally after a restart.
 	SettleFailAcks []SettleFailRef
+
+	// TODO(roasbeef): add information w.r.t any pending commitment
+	// changes? bool that is commit switch, or can be implicit?
 }
 
 // serializeLogUpdates serializes provided list of updates to a stream.
@@ -3441,6 +3463,47 @@ func fetchChanInfo(chanBucket kvdb.RBucket, channel *OpenChannel) error {
 	)
 }
 
+func writeChanCommitTLVRecords(w io.Writer, c *ChannelCommitment) error {
+	commitExtensionRecords, err := tlv.NewStream(
+		tlv.MakePrimitiveRecord(
+			chanTypeTlvRecord, (*uint8)(&c.ChanType),
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	// TODO(roasbeef): don't actually need to store it here?
+
+	return commitExtensionRecords.Encode(w)
+}
+
+func readChanCommitTLVRecords(r io.Reader, c *ChannelCommitment) error {
+
+	var (
+		chanType uint8
+	)
+
+	commitExtensionRecords, err := tlv.NewStream(
+		tlv.MakePrimitiveRecord(
+			chanTypeTlvRecord, &chanType,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	if err := commitExtensionRecords.Decode(r); err != nil {
+		return err
+	}
+
+	// TODO(roasbeef): need something to translate between wire chan type
+	// an disk chan type, or just use one everywhere?
+	c.ChanType = ChannelType(chanType)
+
+	return nil
+}
+
 func deserializeChanCommit(r io.Reader) (ChannelCommitment, error) {
 	var c ChannelCommitment
 
@@ -3483,8 +3546,10 @@ func putChanCommitment(chanBucket kvdb.RwBucket, c *ChannelCommitment,
 	)
 	if local {
 		commitKey = append(chanCommitmentKey, byte(0x00))
+		commitExtKey = append(chanCommitExtKey, byte(0x00))
 	} else {
 		commitKey = append(chanCommitmentKey, byte(0x01))
+		commitExtKey = append(chanCommitExtKey, byte(0x01))
 	}
 
 	var b bytes.Buffer
@@ -3495,6 +3560,14 @@ func putChanCommitment(chanBucket kvdb.RwBucket, c *ChannelCommitment,
 	if err := chanBucket.Put(commitKey, b.Bytes()); err != nil {
 		return err
 	}
+
+	var xb bytes.Buffer
+	if err := writeChanCommitTLVRecords(&xb, c); err != nil {
+		return err
+	}
+
+	return chanBucket.Put(commitExtKey, xb.Bytes())
+}
 
 func putChanCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
 	// If this is a restored channel, then we don't have any commitments to
@@ -3516,11 +3589,16 @@ func putChanCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
 }
 
 func fetchChanCommitment(chanBucket kvdb.RBucket, local bool) (ChannelCommitment, error) {
-	var commitKey []byte
+	var (
+		commitKey    []byte
+		commitExtKey []byte
+	)
 	if local {
 		commitKey = append(chanCommitmentKey, byte(0x00))
+		commitExtKey = append(chanCommitExtKey, byte(0x00))
 	} else {
 		commitKey = append(chanCommitmentKey, byte(0x01))
+		commitExtKey = append(chanCommitExtKey, byte(0x01))
 	}
 
 	commitBytes := chanBucket.Get(commitKey)
@@ -3529,7 +3607,28 @@ func fetchChanCommitment(chanBucket kvdb.RBucket, local bool) (ChannelCommitment
 	}
 
 	r := bytes.NewReader(commitBytes)
-	return deserializeChanCommit(r)
+	chanCommit, err := deserializeChanCommit(r)
+	if err != nil {
+		return ChannelCommitment{}, err
+	}
+
+	commitExtBytes := chanBucket.Get(commitExtKey)
+
+	// If we have no extension bytes, then this is OK as this may be an
+	// older commitment or channel type that didn't use the extension
+	// space.
+	if commitExtBytes == nil {
+		return chanCommit, nil
+	}
+
+	err = readChanCommitTLVRecords(
+		bytes.NewReader(commitExtBytes), &chanCommit,
+	)
+	if err != nil {
+		return ChannelCommitment{}, err
+	}
+
+	return chanCommit, nil
 }
 
 func fetchChanCommitments(chanBucket kvdb.RBucket, channel *OpenChannel) error {
@@ -3618,6 +3717,10 @@ func appendChannelLogEntry(log kvdb.RwBucket,
 
 	var b bytes.Buffer
 	if err := serializeChanCommit(&b, commit); err != nil {
+		return err
+	}
+
+	if err := writeChanCommitTLVRecords(&b, commit); err != nil {
 		return err
 	}
 
