@@ -3344,56 +3344,6 @@ func getOptionalUpfrontShutdownScript(chanBucket kvdb.RBucket, key []byte,
 	return nil
 }
 
-func serializeChanCommit(w io.Writer, c *ChannelCommitment) error {
-	if err := WriteElements(w,
-		c.CommitHeight, c.LocalLogIndex, c.LocalHtlcIndex,
-		c.RemoteLogIndex, c.RemoteHtlcIndex, c.LocalBalance,
-		c.RemoteBalance, c.CommitFee, c.FeePerKw, c.CommitTx,
-		c.CommitSig,
-	); err != nil {
-		return err
-	}
-
-	return SerializeHtlcs(w, c.Htlcs...)
-}
-
-func putChanCommitment(chanBucket kvdb.RwBucket, c *ChannelCommitment,
-	local bool) error {
-
-	var commitKey []byte
-	if local {
-		commitKey = append(chanCommitmentKey, byte(0x00))
-	} else {
-		commitKey = append(chanCommitmentKey, byte(0x01))
-	}
-
-	var b bytes.Buffer
-	if err := serializeChanCommit(&b, c); err != nil {
-		return err
-	}
-
-	return chanBucket.Put(commitKey, b.Bytes())
-}
-
-func putChanCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
-	// If this is a restored channel, then we don't have any commitments to
-	// write.
-	if channel.hasChanStatus(ChanStatusRestored) {
-		return nil
-	}
-
-	err := putChanCommitment(
-		chanBucket, &channel.LocalCommitment, true,
-	)
-	if err != nil {
-		return err
-	}
-
-	return putChanCommitment(
-		chanBucket, &channel.RemoteCommitment, false,
-	)
-}
-
 func putChanRevocationState(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
 
 	var b bytes.Buffer
@@ -3509,6 +3459,60 @@ func deserializeChanCommit(r io.Reader) (ChannelCommitment, error) {
 	}
 
 	return c, nil
+}
+
+func serializeChanCommit(w io.Writer, c *ChannelCommitment) error {
+	if err := WriteElements(w,
+		c.CommitHeight, c.LocalLogIndex, c.LocalHtlcIndex,
+		c.RemoteLogIndex, c.RemoteHtlcIndex, c.LocalBalance,
+		c.RemoteBalance, c.CommitFee, c.FeePerKw, c.CommitTx,
+		c.CommitSig,
+	); err != nil {
+		return err
+	}
+
+	return SerializeHtlcs(w, c.Htlcs...)
+}
+
+func putChanCommitment(chanBucket kvdb.RwBucket, c *ChannelCommitment,
+	local bool) error {
+
+	var (
+		commitKey    []byte
+		commitExtKey []byte
+	)
+	if local {
+		commitKey = append(chanCommitmentKey, byte(0x00))
+	} else {
+		commitKey = append(chanCommitmentKey, byte(0x01))
+	}
+
+	var b bytes.Buffer
+	if err := serializeChanCommit(&b, c); err != nil {
+		return err
+	}
+
+	if err := chanBucket.Put(commitKey, b.Bytes()); err != nil {
+		return err
+	}
+
+func putChanCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
+	// If this is a restored channel, then we don't have any commitments to
+	// write.
+	if channel.hasChanStatus(ChanStatusRestored) {
+		return nil
+	}
+
+	err := putChanCommitment(
+		chanBucket, &channel.LocalCommitment, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	return putChanCommitment(
+		chanBucket, &channel.RemoteCommitment, false,
+	)
 }
 
 func fetchChanCommitment(chanBucket kvdb.RBucket, local bool) (ChannelCommitment, error) {
