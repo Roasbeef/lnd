@@ -4402,7 +4402,6 @@ func (r *rpcServer) dispatchPaymentIntent(
 			FinalCLTVDelta:     payIntent.cltvDelta,
 			FeeLimit:           payIntent.feeLimit,
 			CltvLimit:          payIntent.cltvLimit,
-			PaymentHash:        payIntent.rHash,
 			RouteHints:         payIntent.routeHints,
 			OutgoingChannelIDs: payIntent.outgoingChannelIDs,
 			LastHop:            payIntent.lastHop,
@@ -4415,6 +4414,10 @@ func (r *rpcServer) dispatchPaymentIntent(
 			// Don't enable multi-part payments on the main rpc.
 			// Users need to use routerrpc for that.
 			MaxParts: 1,
+		}
+		err := payment.SetPaymentHash(payIntent.rHash)
+		if err != nil {
+			return nil, err
 		}
 
 		preImage, route, routerErr = r.server.chanRouter.SendPayment(

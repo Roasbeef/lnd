@@ -24,7 +24,7 @@ type paymentLifecycle struct {
 	router        *ChannelRouter
 	totalAmount   lnwire.MilliSatoshi
 	feeLimit      lnwire.MilliSatoshi
-	paymentHash   lntypes.Hash
+	identifier    lntypes.Hash
 	paySession    PaymentSession
 	shardTracker  shards.ShardTracker
 	timeoutChan   <-chan time.Time
@@ -86,7 +86,7 @@ func (p *paymentLifecycle) paymentState(payment *channeldb.MPPayment) (
 func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 	shardHandler := &shardHandler{
 		router:       p.router,
-		paymentHash:  p.paymentHash,
+		identifier:   p.identifier,
 		shardTracker: p.shardTracker,
 		shardErrors:  make(chan error),
 		quit:         make(chan struct{}),
@@ -101,7 +101,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 	// up goroutines that'll collect their results and deliver them to the
 	// lifecycle loop below.
 	payment, err := p.router.cfg.Control.FetchPayment(
-		p.paymentHash,
+		p.identifier,
 	)
 	if err != nil {
 		return [32]byte{}, nil, err
@@ -110,8 +110,8 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 	for _, a := range payment.InFlightHTLCs() {
 		a := a
 
-		log.Infof("Resuming payment shard %v for hash %v",
-			a.AttemptID, p.paymentHash)
+		log.Infof("Resuming payment shard %v for payment %v",
+			a.AttemptID, p.identifier)
 
 		shardHandler.collectResultAsync(&a.HTLCAttemptInfo)
 	}
@@ -130,7 +130,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 		// act on the latest available information, whether we are
 		// resuming an existing payment or just sent a new attempt.
 		payment, err := p.router.cfg.Control.FetchPayment(
-			p.paymentHash,
+			p.identifier,
 		)
 		if err != nil {
 			return [32]byte{}, nil, err
@@ -145,7 +145,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 
 		log.Debugf("Payment %v in state terminate=%v, "+
 			"active_shards=%v, rem_value=%v, fee_limit=%v",
-			p.paymentHash, state.terminate, state.numShardsInFlight,
+			p.identifier, state.terminate, state.numShardsInFlight,
 			state.remainingAmt, state.remainingFees)
 
 		switch {
@@ -192,7 +192,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 			// return with an error the moment all active shards
 			// have finished.
 			saveErr := p.router.cfg.Control.Fail(
-				p.paymentHash, channeldb.FailureReasonTimeout,
+				p.identifier, channeldb.FailureReasonTimeout,
 			)
 			if saveErr != nil {
 				return [32]byte{}, nil, saveErr
@@ -214,7 +214,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 		)
 		if err != nil {
 			log.Warnf("Failed to find route for payment %v: %v",
-				p.paymentHash, err)
+				p.identifier, err)
 
 			routeErr, ok := err.(noRouteError)
 			if !ok {
@@ -228,10 +228,10 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 				failureCode := routeErr.FailureReason()
 				log.Debugf("Marking payment %v permanently "+
 					"failed with no route: %v",
-					p.paymentHash, failureCode)
+					p.identifier, failureCode)
 
 				saveErr := p.router.cfg.Control.Fail(
-					p.paymentHash, failureCode,
+					p.identifier, failureCode,
 				)
 				if saveErr != nil {
 					return [32]byte{}, nil, saveErr
@@ -265,7 +265,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 		if outcome.err != nil {
 			log.Warnf("Failed to launch shard %v for "+
 				"payment %v: %v", attempt.AttemptID,
-				p.paymentHash, outcome.err)
+				p.identifier, outcome.err)
 
 			// We must inspect the error to know whether it was
 			// critical or not, to decide whether we should
@@ -291,7 +291,7 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 // shardHandler holds what is necessary to send and collect the result of
 // shards.
 type shardHandler struct {
-	paymentHash  lntypes.Hash
+	identifier   lntypes.Hash
 	router       *ChannelRouter
 	shardTracker shards.ShardTracker
 
@@ -388,7 +388,7 @@ func (p *shardHandler) launchShard(rt *route.Route,
 	// of the payment that we attempted to send, such that we can query the
 	// Switch for its whereabouts. The route is needed to handle the result
 	// when it eventually comes back.
-	err = p.router.cfg.Control.RegisterAttempt(p.paymentHash, attempt)
+	err = p.router.cfg.Control.RegisterAttempt(p.identifier, attempt)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -440,7 +440,7 @@ func (p *shardHandler) collectResultAsync(attempt *channeldb.HTLCAttemptInfo) {
 
 				log.Errorf("Error collecting result for "+
 					"shard %v for payment %v: %v",
-					attempt.AttemptID, p.paymentHash, err)
+					attempt.AttemptID, p.identifier, err)
 			}
 
 			select {
@@ -505,7 +505,7 @@ func (p *shardHandler) collectResult(attempt *channeldb.HTLCAttemptInfo) (
 	// Now ask the switch to return the result of the payment when
 	// available.
 	resultChan, err := p.router.cfg.Payer.GetPaymentResult(
-		attempt.AttemptID, p.paymentHash, errorDecryptor,
+		attempt.AttemptID, p.identifier, errorDecryptor,
 	)
 	switch {
 
@@ -514,9 +514,9 @@ func (p *shardHandler) collectResult(attempt *channeldb.HTLCAttemptInfo) (
 	// case we can safely send a new payment attempt, and wait for its
 	// result to be available.
 	case err == htlcswitch.ErrPaymentIDNotFound:
-		log.Debugf("Payment ID %v for hash %v not found in "+
+		log.Debugf("Attempt ID %v for payment %v not found in "+
 			"the Switch, retrying.", attempt.AttemptID,
-			p.paymentHash)
+			p.identifier)
 
 		attempt, cErr := p.failAttempt(attempt, err)
 		if cErr != nil {
@@ -572,7 +572,7 @@ func (p *shardHandler) collectResult(attempt *channeldb.HTLCAttemptInfo) (
 
 	// We successfully got a payment result back from the switch.
 	log.Debugf("Payment %v succeeded with pid=%v",
-		p.paymentHash, attempt.AttemptID)
+		p.identifier, attempt.AttemptID)
 
 	// Report success to mission control.
 	err = p.router.cfg.MissionControl.ReportPaymentSuccess(
@@ -586,7 +586,7 @@ func (p *shardHandler) collectResult(attempt *channeldb.HTLCAttemptInfo) (
 	// In case of success we atomically store settle result to the DB move
 	// the shard to the settled state.
 	htlcAttempt, err := p.router.cfg.Control.SettleAttempt(
-		p.paymentHash, attempt.AttemptID,
+		p.identifier, attempt.AttemptID,
 		&channeldb.HTLCSettleInfo{
 			Preimage:   result.Preimage,
 			SettleTime: p.router.cfg.Clock.Now(),
@@ -686,7 +686,7 @@ func (p *shardHandler) sendPaymentAttempt(
 	htlcAdd *lnwire.UpdateAddHTLC) error {
 
 	log.Tracef("Attempting to send payment %v (pid=%v), "+
-		"using route: %v", p.paymentHash, attempt.AttemptID,
+		"using route: %v", p.identifier, attempt.AttemptID,
 		newLogClosure(func() string {
 			return spew.Sdump(attempt.Route)
 		}),
@@ -702,12 +702,12 @@ func (p *shardHandler) sendPaymentAttempt(
 	if err != nil {
 		log.Errorf("Failed sending attempt %d for payment "+
 			"%v to switch: %v", attempt.AttemptID,
-			p.paymentHash, err)
+			p.identifier, err)
 		return err
 	}
 
 	log.Debugf("Payment %v (pid=%v) successfully sent to switch, route: %v",
-		p.paymentHash, attempt.AttemptID, &attempt.Route)
+		p.identifier, attempt.AttemptID, &attempt.Route)
 
 	return nil
 }
@@ -727,9 +727,9 @@ func (p *shardHandler) handleSendError(attempt *channeldb.HTLCAttemptInfo,
 	}
 
 	log.Infof("Payment %v failed: final_outcome=%v, raw_err=%v",
-		p.paymentHash, *reason, sendErr)
+		p.identifier, *reason, sendErr)
 
-	err := p.router.cfg.Control.Fail(p.paymentHash, *reason)
+	err := p.router.cfg.Control.Fail(p.identifier, *reason)
 	if err != nil {
 		return err
 	}
@@ -742,7 +742,7 @@ func (p *shardHandler) failAttempt(attempt *channeldb.HTLCAttemptInfo,
 	sendError error) (*channeldb.HTLCAttempt, error) {
 
 	log.Warnf("Attempt %v for payment %v failed: %v", attempt.AttemptID,
-		p.paymentHash, sendError)
+		p.identifier, sendError)
 
 	failInfo := marshallError(
 		sendError,
@@ -757,7 +757,7 @@ func (p *shardHandler) failAttempt(attempt *channeldb.HTLCAttemptInfo,
 	}
 
 	return p.router.cfg.Control.FailAttempt(
-		p.paymentHash, attempt.AttemptID,
+		p.identifier, attempt.AttemptID,
 		failInfo,
 	)
 }

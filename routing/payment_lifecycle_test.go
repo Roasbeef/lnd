@@ -660,7 +660,7 @@ func TestRouterPaymentStateMachine(t *testing.T) {
 			Target:      testGraph.aliasMap["c"],
 			Amount:      paymentAmt,
 			FeeLimit:    noFeeLimit,
-			PaymentHash: payHash,
+			paymentHash: &payHash,
 		}
 
 		router.cfg.SessionSource = &mockPaymentSessionSource{
