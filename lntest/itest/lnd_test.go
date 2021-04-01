@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -728,38 +730,76 @@ func makeFakePayHash(t *harnessTest) []byte {
 func createPayReqs(node *lntest.HarnessNode, paymentAmt btcutil.Amount,
 	numInvoices int) ([]string, [][]byte, []*lnrpc.Invoice, error) {
 
-	payReqs := make([]string, numInvoices)
-	rHashes := make([][]byte, numInvoices)
-	invoices := make([]*lnrpc.Invoice, numInvoices)
-	for i := 0; i < numInvoices; i++ {
-		preimage := make([]byte, 32)
-		_, err := rand.Read(preimage)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("unable to generate "+
-				"preimage: %v", err)
-		}
-		invoice := &lnrpc.Invoice{
-			Memo:      "testing",
-			RPreimage: preimage,
-			Value:     int64(paymentAmt),
-		}
-		ctxt, _ := context.WithTimeout(
-			context.Background(), defaultTimeout,
-		)
-		resp, err := node.AddInvoice(ctxt, invoice)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("unable to add "+
-				"invoice: %v", err)
-		}
+	var (
+		mtx sync.Mutex
+		eg  errgroup.Group
+	)
 
-		// Set the payment address in the invoice so the caller can
-		// properly use it.
-		invoice.PaymentAddr = resp.PaymentAddr
+	quit := make(chan struct{})
 
-		payReqs[i] = resp.PaymentRequest
-		rHashes[i] = resp.RHash
-		invoices[i] = invoice
+	numWorkers := runtime.NumCPU()
+	work := make(chan struct{}, numWorkers)
+
+	payReqs := make([]string, 0, numInvoices)
+	rHashes := make([][]byte, 0, numInvoices)
+	invoices := make([]*lnrpc.Invoice, 0, numInvoices)
+
+	for i := 0; i < numWorkers; i++ {
+		eg.Go(func() error {
+			for {
+				select {
+				case _, ok := <-work:
+					if !ok {
+						return nil
+					}
+
+					preimage := make([]byte, 32)
+					_, err := rand.Read(preimage)
+					if err != nil {
+
+						return fmt.Errorf("unable to generate "+
+							"preimage: %v", err)
+					}
+					invoice := &lnrpc.Invoice{
+						Memo:      "testing",
+						RPreimage: preimage,
+						Value:     int64(paymentAmt),
+					}
+					ctxt, _ := context.WithTimeout(
+						context.Background(), defaultTimeout,
+					)
+					resp, err := node.AddInvoice(ctxt, invoice)
+					if err != nil {
+						return fmt.Errorf("unable to add "+
+							"invoice: %v", err)
+					}
+
+					// Set the payment address in the invoice so the caller can
+					// properly use it.
+					invoice.PaymentAddr = resp.PaymentAddr
+
+					mtx.Lock()
+
+					payReqs = append(payReqs, resp.PaymentRequest)
+					rHashes = append(rHashes, resp.RHash)
+					invoices = append(invoices, invoice)
+
+					mtx.Unlock()
+
+				case <-quit:
+					return nil
+				}
+			}
+		})
 	}
+
+	for i := 0; i < numInvoices; i++ {
+		work <- struct{}{}
+	}
+
+	close(work)
+	eg.Wait()
+
 	return payReqs, rHashes, invoices, nil
 }
 
@@ -11189,34 +11229,62 @@ func testAsyncPayments(net *lntest.NetworkHarness, t *harnessTest) {
 			"timeout: %v", err)
 	}
 
-	// Simultaneously send payments from Alice to Bob using of Bob's payment
-	// hashes generated above.
-	now := time.Now()
-	errChan := make(chan error)
-	statusChan := make(chan *lnrpc.Payment)
-	for i := 0; i < numInvoices; i++ {
-		payReq := bobPayReqs[i]
-		go func() {
-			ctxt, _ = context.WithTimeout(ctxb, lntest.AsyncBenchmarkTimeout)
-			stream, err := net.Alice.RouterClient.SendPaymentV2(
-				ctxt,
-				&routerrpc.SendPaymentRequest{
-					PaymentRequest: payReq,
-					TimeoutSeconds: 60,
-					FeeLimitMsat:   noFeeLimitMsat,
-				},
-			)
-			if err != nil {
-				errChan <- err
-			}
-			result, err := getPaymentResult(stream)
-			if err != nil {
-				errChan <- err
-			}
+	var eg errgroup.Group
 
-			statusChan <- result
-		}()
+	numWorkers := runtime.NumCPU() * 5
+
+	statusChan := make(chan *lnrpc.Payment, numWorkers)
+	payReqs := make(chan string, numWorkers)
+	errChan := make(chan error)
+
+	worker := func() error {
+		for {
+			select {
+			case payReq, ok := <-payReqs:
+				if !ok {
+					return nil
+				}
+
+				ctxt, _ = context.WithTimeout(ctxb, lntest.AsyncBenchmarkTimeout)
+				stream, err := net.Alice.RouterClient.SendPaymentV2(
+					ctxt,
+					&routerrpc.SendPaymentRequest{
+						PaymentRequest: payReq,
+						TimeoutSeconds: 60,
+						FeeLimitMsat:   noFeeLimitMsat,
+					},
+				)
+				if err != nil {
+					errChan <- err
+					return err
+				}
+
+				result, err := getPaymentResult(stream)
+				if err != nil {
+					errChan <- err
+					return err
+				}
+
+				statusChan <- result
+			}
+		}
 	}
+
+	for i := 0; i < numWorkers; i++ {
+		eg.Go(worker)
+	}
+
+	now := time.Now()
+	go func() {
+		// Simultaneously send payments from Alice to Bob using of Bob's payment
+		// hashes generated above.
+		for i := 0; i < numInvoices; i++ {
+			payReq := bobPayReqs[i]
+			payReqs <- payReq
+		}
+
+		close(payReqs)
+	}()
 
 	// Wait until all the payments have settled.
 	for i := 0; i < numInvoices; i++ {
@@ -11229,6 +11297,10 @@ func testAsyncPayments(net *lntest.NetworkHarness, t *harnessTest) {
 		case err := <-errChan:
 			t.Fatalf("payment error: %v", err)
 		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		t.Fatalf("unable to complete payment: %v", err)
 	}
 
 	// All payments have been sent, mark the finish time.

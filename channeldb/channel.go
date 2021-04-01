@@ -1498,7 +1498,7 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 		return ErrNoRestoredChannelMutation
 	}
 
-	err := kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	err := kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		chanBucket, err := fetchChanBucketRw(
 			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
 		)
@@ -1589,7 +1589,7 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 		}
 
 		return nil
-	}, func() {})
+	})
 	if err != nil {
 		return err
 	}
@@ -2091,7 +2091,7 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		return ErrNoRestoredChannelMutation
 	}
 
-	return kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		// First, we'll grab the writable bucket where this channel's
 		// data resides.
 		chanBucket, err := fetchChanBucketRw(
@@ -2150,7 +2150,7 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 			return err
 		}
 		return chanBucket.Put(commitDiffKey, b2.Bytes())
-	}, func() {})
+	})
 }
 
 // RemoteCommitChainTip returns the "tip" of the current remote commitment
@@ -2319,7 +2319,9 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
 
 	var newRemoteCommit *ChannelCommitment
 
-	err := kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	err := kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
+		newRemoteCommit = nil
+
 		chanBucket, err := fetchChanBucketRw(
 			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
 		)
@@ -2447,8 +2449,6 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
 		newRemoteCommit = &newCommit.Commitment
 
 		return nil
-	}, func() {
-		newRemoteCommit = nil
 	})
 	if err != nil {
 		return err
@@ -2513,9 +2513,9 @@ func (c *OpenChannel) AckAddHtlcs(addRefs ...AddRef) error {
 	c.Lock()
 	defer c.Unlock()
 
-	return kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		return c.Packager.AckAddHtlcs(tx, addRefs...)
-	}, func() {})
+	})
 }
 
 // AckSettleFails updates the SettleFailFilter containing any of the provided
@@ -2526,9 +2526,9 @@ func (c *OpenChannel) AckSettleFails(settleFailRefs ...SettleFailRef) error {
 	c.Lock()
 	defer c.Unlock()
 
-	return kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		return c.Packager.AckSettleFails(tx, settleFailRefs...)
-	}, func() {})
+	})
 }
 
 // SetFwdFilter atomically sets the forwarding filter for the forwarding package
@@ -2537,9 +2537,9 @@ func (c *OpenChannel) SetFwdFilter(height uint64, fwdFilter *PkgFilter) error {
 	c.Lock()
 	defer c.Unlock()
 
-	return kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		return c.Packager.SetFwdFilter(tx, height, fwdFilter)
-	}, func() {})
+	})
 }
 
 // RemoveFwdPkgs atomically removes forwarding packages specified by the remote
@@ -2551,7 +2551,7 @@ func (c *OpenChannel) RemoveFwdPkgs(heights ...uint64) error {
 	c.Lock()
 	defer c.Unlock()
 
-	return kvdb.Update(c.Db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(c.Db, func(tx kvdb.RwTx) error {
 		for _, height := range heights {
 			err := c.Packager.RemovePkg(tx, height)
 			if err != nil {
@@ -2560,7 +2560,7 @@ func (c *OpenChannel) RemoveFwdPkgs(heights ...uint64) error {
 		}
 
 		return nil
-	}, func() {})
+	})
 }
 
 // RevocationLogTail returns the "tail", or the end of the current revocation

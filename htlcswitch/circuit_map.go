@@ -472,7 +472,7 @@ func (cm *circuitMap) TrimOpenCircuits(chanID lnwire.ShortChannelID,
 		return nil
 	}
 
-	return kvdb.Update(cm.cfg.DB, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(cm.cfg.DB, func(tx kvdb.RwTx) error {
 		keystoneBkt := tx.ReadWriteBucket(circuitKeystoneKey)
 		if keystoneBkt == nil {
 			return ErrCorruptedCircuitMap
@@ -486,7 +486,7 @@ func (cm *circuitMap) TrimOpenCircuits(chanID lnwire.ShortChannelID,
 		}
 
 		return nil
-	}, func() {})
+	})
 }
 
 // LookupByHTLC looks up the payment circuit by the outgoing channel and HTLC
@@ -715,7 +715,7 @@ func (cm *circuitMap) OpenCircuits(keystones ...Keystone) error {
 	}
 	cm.mtx.RUnlock()
 
-	err := kvdb.Update(cm.cfg.DB, func(tx kvdb.RwTx) error {
+	err := kvdb.Batch(cm.cfg.DB, func(tx kvdb.RwTx) error {
 		// Now, load the circuit bucket to which we will write the
 		// already serialized circuit.
 		keystoneBkt := tx.ReadWriteBucket(circuitKeystoneKey)
@@ -733,7 +733,7 @@ func (cm *circuitMap) OpenCircuits(keystones ...Keystone) error {
 		}
 
 		return nil
-	}, func() {})
+	})
 
 	if err != nil {
 		return err

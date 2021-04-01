@@ -222,7 +222,7 @@ func deserializeResult(k, v []byte) (*paymentResult, error) {
 
 // AddResult adds a new result to the db.
 func (b *missionControlStore) AddResult(rp *paymentResult) error {
-	return kvdb.Update(b.db, func(tx kvdb.RwTx) error {
+	return kvdb.Batch(b.db, func(tx kvdb.RwTx) error {
 		bucket := tx.ReadWriteBucket(resultsKey)
 
 		// Prune oldest entries.
@@ -253,7 +253,7 @@ func (b *missionControlStore) AddResult(rp *paymentResult) error {
 
 		// Put into results bucket.
 		return bucket.Put(k, v)
-	}, func() {})
+	})
 }
 
 // getResultKey returns a byte slice representing a unique key for this payment

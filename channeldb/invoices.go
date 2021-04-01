@@ -674,7 +674,9 @@ func (d *DB) AddInvoice(newInvoice *Invoice, paymentHash lntypes.Hash) (
 	}
 
 	var invoiceAddIndex uint64
-	err := kvdb.Update(d, func(tx kvdb.RwTx) error {
+	err := kvdb.Batch(d, func(tx kvdb.RwTx) error {
+		invoiceAddIndex = 0
+
 		invoices, err := tx.CreateTopLevelBucket(invoiceBucket)
 		if err != nil {
 			return err
@@ -736,8 +738,6 @@ func (d *DB) AddInvoice(newInvoice *Invoice, paymentHash lntypes.Hash) (
 
 		invoiceAddIndex = newIndex
 		return nil
-	}, func() {
-		invoiceAddIndex = 0
 	})
 	if err != nil {
 		return 0, err
@@ -1105,7 +1105,9 @@ func (d *DB) UpdateInvoice(ref InvoiceRef,
 	callback InvoiceUpdateCallback) (*Invoice, error) {
 
 	var updatedInvoice *Invoice
-	err := kvdb.Update(d, func(tx kvdb.RwTx) error {
+	err := kvdb.Batch(d, func(tx kvdb.RwTx) error {
+		updatedInvoice = nil
+
 		invoices, err := tx.CreateTopLevelBucket(invoiceBucket)
 		if err != nil {
 			return err
@@ -1141,8 +1143,6 @@ func (d *DB) UpdateInvoice(ref InvoiceRef,
 		)
 
 		return err
-	}, func() {
-		updatedInvoice = nil
 	})
 
 	return updatedInvoice, err
