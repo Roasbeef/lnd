@@ -11229,62 +11229,34 @@ func testAsyncPayments(net *lntest.NetworkHarness, t *harnessTest) {
 			"timeout: %v", err)
 	}
 
-	var eg errgroup.Group
-
-	numWorkers := runtime.NumCPU() * 5
-
-	statusChan := make(chan *lnrpc.Payment, numWorkers)
-	payReqs := make(chan string, numWorkers)
-	errChan := make(chan error)
-
-	worker := func() error {
-		for {
-			select {
-			case payReq, ok := <-payReqs:
-				if !ok {
-					return nil
-				}
-
-				ctxt, _ = context.WithTimeout(ctxb, lntest.AsyncBenchmarkTimeout)
-				stream, err := net.Alice.RouterClient.SendPaymentV2(
-					ctxt,
-					&routerrpc.SendPaymentRequest{
-						PaymentRequest: payReq,
-						TimeoutSeconds: 60,
-						FeeLimitMsat:   noFeeLimitMsat,
-					},
-				)
-				if err != nil {
-					errChan <- err
-					return err
-				}
-
-				result, err := getPaymentResult(stream)
-				if err != nil {
-					errChan <- err
-					return err
-				}
-
-				statusChan <- result
-			}
-		}
-	}
-
-	for i := 0; i < numWorkers; i++ {
-		eg.Go(worker)
-	}
-
+	// Simultaneously send payments from Alice to Bob using of Bob's payment
+	// hashes generated above.
 	now := time.Now()
-	go func() {
-		// Simultaneously send payments from Alice to Bob using of Bob's payment
-		// hashes generated above.
-		for i := 0; i < numInvoices; i++ {
-			payReq := bobPayReqs[i]
-			payReqs <- payReq
-		}
+	errChan := make(chan error)
+	statusChan := make(chan *lnrpc.Payment)
+	for i := 0; i < numInvoices; i++ {
+		payReq := bobPayReqs[i]
+		go func() {
+			ctxt, _ = context.WithTimeout(ctxb, lntest.AsyncBenchmarkTimeout)
+			stream, err := net.Alice.RouterClient.SendPaymentV2(
+				ctxt,
+				&routerrpc.SendPaymentRequest{
+					PaymentRequest: payReq,
+					TimeoutSeconds: 60,
+					FeeLimitMsat:   noFeeLimitMsat,
+				},
+			)
+			if err != nil {
+				errChan <- err
+			}
+			result, err := getPaymentResult(stream)
+			if err != nil {
+				errChan <- err
+			}
 
-		close(payReqs)
-	}()
+			statusChan <- result
+		}()
+	}
 
 	// Wait until all the payments have settled.
 	for i := 0; i < numInvoices; i++ {
@@ -11297,10 +11269,6 @@ func testAsyncPayments(net *lntest.NetworkHarness, t *harnessTest) {
 		case err := <-errChan:
 			t.Fatalf("payment error: %v", err)
 		}
-	}
-
-	if err := eg.Wait(); err != nil {
-		t.Fatalf("unable to complete payment: %v", err)
 	}
 
 	// All payments have been sent, mark the finish time.
@@ -11363,6 +11331,7 @@ func testAsyncPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	// relevant channel closing post conditions.
 	ctxt, _ = context.WithTimeout(ctxb, channelCloseTimeout)
 	closeChannelAndAssert(ctxt, t, net, net.Alice, chanPoint, false)
+
 }
 
 // testBidirectionalAsyncPayments tests that nodes are able to send the
