@@ -5,6 +5,12 @@ import (
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/tlv"
+)
+
+const (
+	// SigRecordType...
+	SigRecordType = 2023
 )
 
 // Sig is a fixed-sized ECDSA signature. Unlike Bitcoin, we use fixed sized
@@ -126,4 +132,10 @@ func extractCanonicalPadding(b []byte) []byte {
 		}
 	}
 	return []byte{0x00}
+}
+
+// Record returns a TLV record that can be used to encode the Sig instance
+// within an ExtraData TLV stream.
+func (b *Sig) Record() tlv.Record {
+	return tlv.MakePrimitiveRecord(SigRecordType, (*[64]byte)(b))
 }

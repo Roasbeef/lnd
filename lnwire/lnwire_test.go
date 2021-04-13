@@ -855,13 +855,60 @@ func TestLightningWireProtocol(t *testing.T) {
 
 			v[0] = reflect.ValueOf(req)
 		},
-		MsgCommitUpdate: func(v []reflect.Value, r *rand.Rand) {
-			req := CommitUpdate{
+		MsgCommitUpdatePropose: func(v []reflect.Value, r *rand.Rand) {
+			req := CommitUpdatePropose{
 				NewChanType: ChannelType(r.Int31()),
 				ExtraData:   make([]byte, 0),
 			}
 
+			if _, err := rand.Read(req.Sig[:]); err != nil {
+				t.Fatalf("unable to read sig: %v", err)
+				return
+			}
+
 			if _, err := rand.Read(req.ChanID[:]); err != nil {
+				t.Fatalf("unable to read chan type: %v", err)
+				return
+			}
+
+			v[0] = reflect.ValueOf(req)
+		},
+		MsgCommitUpdateApply: func(v []reflect.Value, r *rand.Rand) {
+			req := CommitUpdateApply{}
+			if _, err := rand.Read(req.ChanID[:]); err != nil {
+				t.Fatalf("unable to read chan type: %v", err)
+				return
+			}
+
+			// We'll leave out the local proposal 50% of the time.
+			if r.Int31()%2 == 0 {
+				req.LocalProposal = &CommitUpdatePropose{
+					NewChanType: ChannelType(r.Int31()),
+					ExtraData:   make([]byte, 0),
+				}
+				_, err := rand.Read(req.LocalProposal.Sig[:])
+				if err != nil {
+					t.Fatalf("unable to read sig: %v", err)
+					return
+				}
+				_, err = rand.Read(req.LocalProposal.ChanID[:])
+				if err != nil {
+					t.Fatalf("unable to read chan type: %v", err)
+					return
+				}
+			}
+
+			req.RemoteProposal = &CommitUpdatePropose{
+				NewChanType: ChannelType(r.Int31()),
+				ExtraData:   make([]byte, 0),
+			}
+			_, err := rand.Read(req.RemoteProposal.Sig[:])
+			if err != nil {
+				t.Fatalf("unable to read sig: %v", err)
+				return
+			}
+			_, err = rand.Read(req.RemoteProposal.ChanID[:])
+			if err != nil {
 				t.Fatalf("unable to read chan type: %v", err)
 				return
 			}
@@ -1049,8 +1096,14 @@ func TestLightningWireProtocol(t *testing.T) {
 			},
 		},
 		{
-			msgType: MsgCommitUpdate,
-			scenario: func(m CommitUpdate) bool {
+			msgType: MsgCommitUpdatePropose,
+			scenario: func(m CommitUpdatePropose) bool {
+				return mainScenario(&m)
+			},
+		},
+		{
+			msgType: MsgCommitUpdateApply,
+			scenario: func(m CommitUpdateApply) bool {
 				return mainScenario(&m)
 			},
 		},

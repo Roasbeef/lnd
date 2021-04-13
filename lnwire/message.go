@@ -45,16 +45,18 @@ const (
 	MsgUpdateFee                           = 134
 	MsgUpdateFailMalformedHTLC             = 135
 	MsgChannelReestablish                  = 136
-	MsgCommitUpdate                        = 137
-	MsgChannelAnnouncement                 = 256
-	MsgNodeAnnouncement                    = 257
-	MsgChannelUpdate                       = 258
-	MsgAnnounceSignatures                  = 259
-	MsgQueryShortChanIDs                   = 261
-	MsgReplyShortChanIDsEnd                = 262
-	MsgQueryChannelRange                   = 263
-	MsgReplyChannelRange                   = 264
-	MsgGossipTimestampRange                = 265
+	MsgCommitUpdatePropose                 = 137
+	MsgCommitUpdateApply                   = 138
+
+	MsgChannelAnnouncement  = 256
+	MsgNodeAnnouncement     = 257
+	MsgChannelUpdate        = 258
+	MsgAnnounceSignatures   = 259
+	MsgQueryShortChanIDs    = 261
+	MsgReplyShortChanIDsEnd = 262
+	MsgQueryChannelRange    = 263
+	MsgReplyChannelRange    = 264
+	MsgGossipTimestampRange = 265
 )
 
 // String return the string representation of message type.
@@ -116,8 +118,10 @@ func (t MessageType) String() string {
 		return "ReplyChannelRange"
 	case MsgGossipTimestampRange:
 		return "GossipTimestampRange"
-	case MsgCommitUpdate:
-		return "CommitUpdate"
+	case MsgCommitUpdatePropose:
+		return "CommitUpdatePropose"
+	case MsgCommitUpdateApply:
+		return "CommitUpdateApply"
 	default:
 		return "<unknown>"
 	}
@@ -219,8 +223,10 @@ func makeEmptyMessage(msgType MessageType) (Message, error) {
 		msg = &ReplyChannelRange{}
 	case MsgGossipTimestampRange:
 		msg = &GossipTimestampRange{}
-	case MsgCommitUpdate:
-		msg = &CommitUpdate{}
+	case MsgCommitUpdatePropose:
+		msg = &CommitUpdatePropose{}
+	case MsgCommitUpdateApply:
+		msg = &CommitUpdateApply{}
 	default:
 		return nil, &UnknownMessage{msgType}
 	}

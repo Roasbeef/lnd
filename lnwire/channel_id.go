@@ -21,12 +21,12 @@ const (
 )
 
 const (
-	// ChannelIDType is the number of the record used to encode the channel
+	// ChannelIDRecordType is the number of the record used to encode the channel
 	// ID type across all messages.
 	//
 	// TODO(roasbeef): should technically be scoped to the msg itself, can
 	// add a higher level function to specify the delivery addr type...
-	ChannelIDType = 2022
+	ChannelIDRecordType = 2022
 )
 
 // ChannelID is a series of 32-bytes that uniquely identifies all channels
@@ -137,24 +137,6 @@ func dChanID(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 func (c *ChannelID) Record() tlv.Record {
 
 	return tlv.MakeStaticRecord(
-		ChannelIDType, c, 32, eChanID, dChanID,
+		ChannelIDRecordType, c, 32, eChanID, dChanID,
 	)
-}
-
-// recordScoper...
-type recordScoper struct {
-	cid *ChannelID
-
-	recordType tlv.Type
-}
-
-func (r *recordScoper) Record() tlv.Record {
-	return tlv.MakePrimitiveRecord(r.recordType, r.cid)
-}
-
-func (c *ChannelID) ScopedRecord(scopedType tlv.Type) *recordScoper {
-	return &recordScoper{
-		cid:        c,
-		recordType: scopedType,
-	}
 }

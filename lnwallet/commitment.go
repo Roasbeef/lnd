@@ -440,9 +440,14 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 
 	numHTLCs := int64(0)
 	for _, htlc := range filteredHTLCView.ourUpdates {
+		addEntry, ok := htlc.(*addLogEntry)
+		if !ok {
+			continue
+		}
+
 		if htlcIsDust(
 			cb.chanState.ChanType, false, isOurs, feePerKw,
-			htlc.Amount.ToSatoshis(), dustLimit,
+			addEntry.Amount.ToSatoshis(), dustLimit,
 		) {
 			continue
 		}
@@ -450,9 +455,14 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 		numHTLCs++
 	}
 	for _, htlc := range filteredHTLCView.theirUpdates {
+		addEntry, ok := htlc.(*addLogEntry)
+		if !ok {
+			continue
+		}
+
 		if htlcIsDust(
 			cb.chanState.ChanType, true, isOurs, feePerKw,
-			htlc.Amount.ToSatoshis(), dustLimit,
+			addEntry.Amount.ToSatoshis(), dustLimit,
 		) {
 			continue
 		}
@@ -529,38 +539,48 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	// purposes of sorting.
 	cltvs := make([]uint32, len(commitTx.TxOut))
 	for _, htlc := range filteredHTLCView.ourUpdates {
+		addEntry, ok := htlc.(*addLogEntry)
+		if !ok {
+			continue
+		}
+
 		if htlcIsDust(
 			cb.chanState.ChanType, false, isOurs, feePerKw,
-			htlc.Amount.ToSatoshis(), dustLimit,
+			addEntry.Amount.ToSatoshis(), dustLimit,
 		) {
 			continue
 		}
 
 		err := addHTLC(
-			commitTx, isOurs, false, htlc, keyRing,
+			commitTx, isOurs, false, addEntry, keyRing,
 			cb.chanState.ChanType,
 		)
 		if err != nil {
 			return nil, err
 		}
-		cltvs = append(cltvs, htlc.Timeout)
+		cltvs = append(cltvs, addEntry.Timeout)
 	}
 	for _, htlc := range filteredHTLCView.theirUpdates {
+		addEntry, ok := htlc.(*addLogEntry)
+		if !ok {
+			continue
+		}
+
 		if htlcIsDust(
 			cb.chanState.ChanType, true, isOurs, feePerKw,
-			htlc.Amount.ToSatoshis(), dustLimit,
+			addEntry.Amount.ToSatoshis(), dustLimit,
 		) {
 			continue
 		}
 
 		err := addHTLC(
-			commitTx, isOurs, true, htlc, keyRing,
+			commitTx, isOurs, true, addEntry, keyRing,
 			cb.chanState.ChanType,
 		)
 		if err != nil {
 			return nil, err
 		}
-		cltvs = append(cltvs, htlc.Timeout)
+		cltvs = append(cltvs, addEntry.Timeout)
 	}
 
 	// Set the state hint of the commitment transaction to facilitate
@@ -668,6 +688,8 @@ func CreateCommitTx(chanType channeldb.ChannelType,
 	}
 
 	// If this channel type has anchors, we'll also add those.
+	//
+	// TODO(roasbeef): gate anchor size based off new channel type
 	if chanType.HasAnchors() {
 		localAnchor, remoteAnchor, err := CommitScriptAnchors(
 			localChanCfg, remoteChanCfg,
@@ -819,11 +841,11 @@ func genHtlcScript(chanType channeldb.ChannelType, isIncoming, ourCommit bool,
 // PaymentDescriptor that generated it, the generated script is stored within
 // the descriptor itself.
 func addHTLC(commitTx *wire.MsgTx, ourCommit bool,
-	isIncoming bool, paymentDesc *PaymentDescriptor,
+	isIncoming bool, htlc *addLogEntry,
 	keyRing *CommitmentKeyRing, chanType channeldb.ChannelType) error {
 
-	timeout := paymentDesc.Timeout
-	rHash := paymentDesc.RHash
+	timeout := htlc.Timeout
+	rHash := htlc.RHash
 
 	p2wsh, witnessScript, err := genHtlcScript(
 		chanType, isIncoming, ourCommit, timeout, rHash, keyRing,
@@ -833,17 +855,17 @@ func addHTLC(commitTx *wire.MsgTx, ourCommit bool,
 	}
 
 	// Add the new HTLC outputs to the respective commitment transactions.
-	amountPending := int64(paymentDesc.Amount.ToSatoshis())
+	amountPending := int64(htlc.Amount.ToSatoshis())
 	commitTx.AddTxOut(wire.NewTxOut(amountPending, p2wsh))
 
 	// Store the pkScript of this particular PaymentDescriptor so we can
 	// quickly locate it within the commitment transaction later.
 	if ourCommit {
-		paymentDesc.ourPkScript = p2wsh
-		paymentDesc.ourWitnessScript = witnessScript
+		htlc.ourPkScript = p2wsh
+		htlc.ourWitnessScript = witnessScript
 	} else {
-		paymentDesc.theirPkScript = p2wsh
-		paymentDesc.theirWitnessScript = witnessScript
+		htlc.theirPkScript = p2wsh
+		htlc.theirWitnessScript = witnessScript
 	}
 
 	return nil

@@ -2,6 +2,7 @@ package lnwire
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 
@@ -58,8 +59,6 @@ func (e *ExtraOpaqueData) PackRecords(recordProducers ...tlv.RecordProducer) err
 		records = append(records, producer.Record())
 	}
 
-	// TODO(roasbeef: sorting isn't working?
-
 	// Ensure that the set of records are sorted before we encode them into
 	// the stream, to ensure they're canonical.
 	tlv.SortRecords(records)
@@ -94,8 +93,12 @@ func (e *ExtraOpaqueData) ExtractRecords(recordProducers ...tlv.RecordProducer) 
 
 	extraBytesReader := bytes.NewReader(*e)
 
+	// Ensure that the set of records are sorted before we decode them.
+	tlv.SortRecords(records)
+
 	tlvStream, err := tlv.NewStream(records...)
 	if err != nil {
+		fmt.Println("fail internal decode")
 		return nil, err
 	}
 
