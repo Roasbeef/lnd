@@ -2120,9 +2120,19 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 	// change, which depends on having an accurate view of the accepted
 	// HTLCs.
 	if update.State != nil {
-		err := updateInvoiceState(&invoice, hash, *update.State)
+		newState, err := updateInvoiceState(
+			&invoice, hash, *update.State,
+		)
 		if err != nil {
 			return nil, err
+		}
+
+		// If this isn't an AMP invoice, then we'll go ahead and update
+		// the invoice state directly here. For AMP invoices, we
+		// instead will keep the top-level invoice open, and instead
+		// update the state of each _htlc set_ instead.
+		if !invoiceIsAMP {
+			invoice.State = *newState
 		}
 
 		if update.State.NewState == ContractSettled {
@@ -2202,13 +2212,15 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 	return &invoice, nil
 }
 
-// updateInvoiceState validates and processes an invoice state update.
+// updateInvoiceState validates and processes an invoice state update. The new
+// state to transition to is returned, so the caller is able to select exactly
+// how the invoice state is updated.
 func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
-	update InvoiceStateUpdateDesc) error {
+	update InvoiceStateUpdateDesc) (*ContractState, error) {
 
 	// Returning to open is never allowed from any state.
 	if update.NewState == ContractOpen {
-		return ErrInvoiceCannotOpen
+		return nil, ErrInvoiceCannotOpen
 	}
 
 	switch invoice.State {
@@ -2219,7 +2231,7 @@ func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
 	// same checks that we apply to open invoices.
 	case ContractAccepted:
 		if update.NewState == ContractAccepted {
-			return ErrInvoiceCannotAccept
+			return nil, ErrInvoiceCannotAccept
 		}
 
 		fallthrough
@@ -2229,14 +2241,13 @@ func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
 	// where we ensure the preimage is valid.
 	case ContractOpen:
 		if update.NewState == ContractCanceled {
-			invoice.State = update.NewState
-			return nil
+			return &update.NewState, nil
 		}
 
 		// Sanity check that the user isn't trying to settle or accept a
 		// non-existent HTLC set.
 		if len(invoice.HTLCSet(update.SetID, HtlcStateAccepted)) == 0 {
-			return ErrEmptyHTLCSet
+			return nil, ErrEmptyHTLCSet
 		}
 
 		// For AMP invoices, there are no invoice-level preimage checks.
@@ -2244,10 +2255,10 @@ func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
 		// settle an AMP invoice with a preimage.
 		if update.SetID != nil {
 			if update.Preimage != nil {
-				return errors.New("AMP set cannot have preimage")
+				return nil, errors.New("AMP set cannot have " +
+					"preimage")
 			}
-			invoice.State = update.NewState
-			return nil
+			return &update.NewState, nil
 		}
 
 		switch {
@@ -2255,12 +2266,12 @@ func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
 		// If an invoice-level preimage was supplied, but the InvoiceRef
 		// doesn't specify a hash (e.g. AMP invoices) we fail.
 		case update.Preimage != nil && hash == nil:
-			return ErrUnexpectedInvoicePreimage
+			return nil, ErrUnexpectedInvoicePreimage
 
 		// Validate the supplied preimage for non-AMP invoices.
 		case update.Preimage != nil:
 			if update.Preimage.Hash() != *hash {
-				return ErrInvoicePreimageMismatch
+				return nil, ErrInvoicePreimageMismatch
 			}
 			invoice.Terms.PaymentPreimage = update.Preimage
 
@@ -2274,23 +2285,21 @@ func updateInvoiceState(invoice *Invoice, hash *lntypes.Hash,
 		case update.NewState == ContractSettled &&
 			invoice.Terms.PaymentPreimage == nil:
 
-			return errors.New("unknown preimage")
+			return nil, errors.New("unknown preimage")
 		}
 
-		invoice.State = update.NewState
-
-		return nil
+		return &update.NewState, nil
 
 	// Once settled, we are in a terminal state.
 	case ContractSettled:
-		return ErrInvoiceAlreadySettled
+		return nil, ErrInvoiceAlreadySettled
 
 	// Once canceled, we are in a terminal state.
 	case ContractCanceled:
-		return ErrInvoiceAlreadyCanceled
+		return nil, ErrInvoiceAlreadyCanceled
 
 	default:
-		return errors.New("unknown state transition")
+		return nil, errors.New("unknown state transition")
 	}
 }
 
