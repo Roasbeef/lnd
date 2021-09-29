@@ -49,7 +49,8 @@ func randInvoice(value lnwire.MilliSatoshi) (*Invoice, error) {
 			Value:           value,
 			Features:        emptyFeatures,
 		},
-		Htlcs: map[CircuitKey]*InvoiceHTLC{},
+		Htlcs:    map[CircuitKey]*InvoiceHTLC{},
+		AMPState: map[SetID]InvoiceStateAMP{},
 	}
 	i.Memo = []byte("memo")
 
@@ -1191,6 +1192,10 @@ func testInvoiceHtlcAMPFields(t *testing.T, isAMP bool) {
 
 	testInvoice, err := randInvoice(1000)
 	require.Nil(t, err)
+
+	if isAMP {
+		testInvoice.Terms.Features = ampFeatures
+	}
 
 	payHash := testInvoice.Terms.PaymentPreimage.Hash()
 	_, err = db.AddInvoice(testInvoice, payHash)
@@ -2474,3 +2479,6 @@ func TestAddInvoiceInvalidFeatureDeps(t *testing.T) {
 		lnwire.PaymentAddrOptional,
 	))
 }
+
+// TODO(roasbeef): addition tests for repeated HTLC addition to given AMP invoice
+//  * amp paid update along w/ new in-memory indexes
