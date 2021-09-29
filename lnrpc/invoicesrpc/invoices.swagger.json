@@ -16,6 +16,39 @@
     "application/json"
   ],
   "paths": {
+    "/v2/invoices": {
+      "post": {
+        "summary": "LookupInvoiceV2 attempts to look up at invoice. An invoice can be refrenced\nusing either its payment hash, payment address, or set ID.",
+        "operationId": "Invoices_LookupInvoiceV2",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/lnrpcInvoice"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/invoicesrpcLookupInvoiceMsg"
+            }
+          }
+        ],
+        "tags": [
+          "Invoices"
+        ]
+      }
+    },
     "/v2/invoices/cancel": {
       "post": {
         "summary": "CancelInvoice cancels a currently open invoice. If the invoice is already\ncanceled, this call will succeed. If the invoice is already settled, it will\nfail.",
@@ -256,6 +289,23 @@
     },
     "invoicesrpcCancelInvoiceResp": {
       "type": "object"
+    },
+    "invoicesrpcLookupInvoiceMsg": {
+      "type": "object",
+      "properties": {
+        "payment_hash": {
+          "type": "string",
+          "format": "byte"
+        },
+        "payment_addr": {
+          "type": "string",
+          "format": "byte"
+        },
+        "set_id": {
+          "type": "string",
+          "format": "byte"
+        }
+      }
     },
     "invoicesrpcSettleInvoiceMsg": {
       "type": "object",

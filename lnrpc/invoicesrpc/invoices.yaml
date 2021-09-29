@@ -14,3 +14,6 @@ http:
     - selector: invoicesrpc.Invoices.SettleInvoice
       post: "/v2/invoices/settle"
       body: "*"
+    - selector: invoicesrpc.Invoices.LookupInvoiceV2
+      post: "/v2/invoices"
+      body: "*"
