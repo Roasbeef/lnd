@@ -37,6 +37,10 @@ type InvoicesClient interface {
 	//SettleInvoice settles an accepted invoice. If the invoice is already
 	//settled, this call will succeed.
 	SettleInvoice(ctx context.Context, in *SettleInvoiceMsg, opts ...grpc.CallOption) (*SettleInvoiceResp, error)
+	//
+	//LookupInvoice attempts to look up at invoice. An invoice can be refrenced
+	//using either its payment hash, payment address, or set ID.
+	LookupInvoice(ctx context.Context, in *LookupInvoiceMsg, opts ...grpc.CallOption) (*lnrpc.Invoice, error)
 }
 
 type invoicesClient struct {
@@ -106,6 +110,15 @@ func (c *invoicesClient) SettleInvoice(ctx context.Context, in *SettleInvoiceMsg
 	return out, nil
 }
 
+func (c *invoicesClient) LookupInvoice(ctx context.Context, in *LookupInvoiceMsg, opts ...grpc.CallOption) (*lnrpc.Invoice, error) {
+	out := new(lnrpc.Invoice)
+	err := c.cc.Invoke(ctx, "/invoicesrpc.Invoices/LookupInvoice", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // InvoicesServer is the server API for Invoices service.
 // All implementations must embed UnimplementedInvoicesServer
 // for forward compatibility
@@ -128,6 +141,10 @@ type InvoicesServer interface {
 	//SettleInvoice settles an accepted invoice. If the invoice is already
 	//settled, this call will succeed.
 	SettleInvoice(context.Context, *SettleInvoiceMsg) (*SettleInvoiceResp, error)
+	//
+	//LookupInvoice attempts to look up at invoice. An invoice can be refrenced
+	//using either its payment hash, payment address, or set ID.
+	LookupInvoice(context.Context, *LookupInvoiceMsg) (*lnrpc.Invoice, error)
 	mustEmbedUnimplementedInvoicesServer()
 }
 
@@ -146,6 +163,9 @@ func (UnimplementedInvoicesServer) AddHoldInvoice(context.Context, *AddHoldInvoi
 }
 func (UnimplementedInvoicesServer) SettleInvoice(context.Context, *SettleInvoiceMsg) (*SettleInvoiceResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SettleInvoice not implemented")
+}
+func (UnimplementedInvoicesServer) LookupInvoice(context.Context, *LookupInvoiceMsg) (*lnrpc.Invoice, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LookupInvoice not implemented")
 }
 func (UnimplementedInvoicesServer) mustEmbedUnimplementedInvoicesServer() {}
 
@@ -235,6 +255,24 @@ func _Invoices_SettleInvoice_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Invoices_LookupInvoice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LookupInvoiceMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(InvoicesServer).LookupInvoice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/invoicesrpc.Invoices/LookupInvoice",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(InvoicesServer).LookupInvoice(ctx, req.(*LookupInvoiceMsg))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Invoices_ServiceDesc is the grpc.ServiceDesc for Invoices service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -253,6 +291,10 @@ var Invoices_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SettleInvoice",
 			Handler:    _Invoices_SettleInvoice_Handler,
+		},
+		{
+			MethodName: "LookupInvoice",
+			Handler:    _Invoices_LookupInvoice_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

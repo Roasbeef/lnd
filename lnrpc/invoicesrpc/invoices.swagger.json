@@ -264,6 +264,11 @@
           "type": "string",
           "format": "byte",
           "description": "Externally discovered pre-image that should be used to settle the hold\ninvoice."
+        },
+        "set_id": {
+          "type": "string",
+          "format": "byte",
+          "description": "The set ID of the set of HLTCs for a given AMP payment that the caller\nwishes to settle. This value is mututally exclusive with the preimage\nvalue above."
         }
       }
     },
