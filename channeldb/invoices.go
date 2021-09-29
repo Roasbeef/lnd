@@ -1823,6 +1823,7 @@ func deserializeInvoice(r io.Reader) (Invoice, error) {
 	)
 
 	i.Htlcs, err = deserializeHtlcs(r)
+	i.AMPState = make(map[SetID]InvoiceStateAMP)
 	return i, err
 }
 
@@ -2247,11 +2248,22 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		// TODO(roasbeef): also add an include settleIndex within HTLC value
 
 		// Update the running amount paid to this invoice. We don't
-		// include accepted htlcs when the invoice is still open.
-		if invoice.State != ContractOpen &&
-			(htlc.State == HtlcStateAccepted ||
-				htlc.State == HtlcStateSettled) {
+		// include accepted htlcs when the invoice is still open, other
+		// than if this is an AMP invoice.
+		var updateAmtPaid bool
 
+		invoiceStateReady := (htlc.State == HtlcStateAccepted ||
+			htlc.State == HtlcStateSettled)
+
+		if !invoiceIsAMP {
+			updateAmtPaid = (invoice.State != ContractOpen &&
+				invoiceStateReady)
+		} else {
+			updateAmtPaid = (invoice.State == ContractOpen &&
+				invoiceStateReady)
+		}
+
+		if updateAmtPaid {
 			amtPaid += htlc.Amt
 		}
 	}
