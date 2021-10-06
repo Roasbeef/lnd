@@ -2146,6 +2146,10 @@ func TestUpdateHTLC(t *testing.T) {
 			expErr: nil,
 		},
 		{
+			// With the newer AMP logic, this is now valid, as we
+			// want to be able to accept multiple settle attempts
+			// to a given pay_addr. In this case, the HTLC should
+			// remain in the accepted state.
 			name: "AMP settle valid preimage different htlc set",
 			input: InvoiceHTLC{
 				Amt:           5000,
@@ -2169,9 +2173,9 @@ func TestUpdateHTLC(t *testing.T) {
 				MppTotalAmt:   5000,
 				AcceptHeight:  100,
 				AcceptTime:    testNow,
-				ResolveTime:   testNow,
+				ResolveTime:   time.Time{},
 				Expiry:        40,
-				State:         HtlcStateCanceled,
+				State:         HtlcStateAccepted,
 				CustomRecords: make(record.CustomSet),
 				AMP: &InvoiceHtlcAMPData{
 					Record:   *ampRecord,
