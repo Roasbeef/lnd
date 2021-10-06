@@ -2523,7 +2523,51 @@ func setSettleMetaFields(settleIndex kvdb.RwBucket, invoiceNum []byte,
 	return nil
 }
 
-// InvoiceDeleteRef holds a refererence to an invoice to be deleted.
+// delAMPInvoices attempts to delete all the "sub" invoices associated with a
+// greater AMP invoices. We do this by deleting the set of keys that share the
+// invoice number as a prefix.
+func delAMPInvoices(invoiceNum []byte, invoiceBucket kvdb.RwBucket) error {
+	invoiceCursor := invoiceBucket.ReadCursor()
+
+	// Seek to the first key that includes the invoice data itself.
+	invoiceCursor.Seek(invoiceNum)
+
+	// Advance to the very first key _after_ the invoice data, as this is
+	// where we'll encounter our first HTLC (if any are present).
+	cursorKey, _ := invoiceCursor.Next()
+
+	// If as this point, the cursor key doesn't match the invoice num
+	// prefix, then we know that this HTLC doesn't have any set ID HTLCs
+	// associated with it.
+	//
+	// TODO(roasbeef): consolidate logic
+	if !bytes.HasPrefix(cursorKey, invoiceNum) {
+		return nil
+	}
+
+	// Since it isn't safe to delete using an active cursor, we'll use the
+	// cursor simply to collect the set of keys we need to delete, _then_
+	// delete them in another pass.
+	var keysToDel [][]byte
+	for ; cursorKey != nil && bytes.HasPrefix(cursorKey, invoiceNum); cursorKey, _ = invoiceCursor.Next() {
+		// TODO(roasbeef): need to copy here??
+		keysToDel = append(keysToDel, cursorKey)
+
+	}
+
+	for _, keyToDel := range keysToDel {
+		if err := invoiceBucket.Delete(keyToDel); err != nil {
+			return err
+		}
+	}
+
+	// TODO(roasbeef): also need to remove from the add and settle indexes
+	// as well
+
+	return nil
+}
+
+// InvoiceDeleteRef holds a reference to an invoice to be deleted.
 type InvoiceDeleteRef struct {
 	// PayHash is the payment hash of the target invoice. All invoices are
 	// currently indexed by payment hash.
@@ -2564,6 +2608,7 @@ func (d *DB) DeleteInvoice(invoicesToDelete []InvoiceDeleteRef) error {
 		if invoiceAddIndex == nil {
 			return ErrNoInvoicesCreated
 		}
+
 		// settleIndex can be nil, as the bucket is created lazily
 		// when the first invoice is settled.
 		settleIndex := invoices.NestedReadWriteBucket(settleIndexBucket)
@@ -2650,6 +2695,15 @@ func (d *DB) DeleteInvoice(invoicesToDelete []InvoiceDeleteRef) error {
 			// Finally remove the serialized invoice from the
 			// invoice bucket.
 			err = invoices.Delete(invoiceKey)
+			if err != nil {
+				return err
+			}
+
+			// In addition to deleting the main invoice state, if
+			// this is an AMP invoice, then we'll also need to
+			// delete the set HTLC set stored as a key prefix. For
+			// non-AMP invoices, this'll be a noop.
+			err = delAMPInvoices(invoiceKey, invoices)
 			if err != nil {
 				return err
 			}
