@@ -2061,9 +2061,9 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		// If a newly added HTLC has an associated set id, use it to
 		// index this invoice in the set id index. An error is returned
 		// if we find the index already points to a different invoice.
-		var setID SetID
+		var setID [32]byte
 		if htlcUpdate.AMP != nil {
-			setID := htlcUpdate.AMP.Record.SetID()
+			setID = htlcUpdate.AMP.Record.SetID()
 			setIDInvNum := setIDIndex.Get(setID[:])
 			if setIDInvNum == nil {
 				err = setIDIndex.Put(setID[:], invoiceNum)
@@ -2093,22 +2093,26 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		if invoiceIsAMP {
 			ampState, ok := invoice.AMPState[setID]
 			if !ok {
-				invoice.AMPState[setID] = InvoiceStateAMP{
+				ampState = InvoiceStateAMP{
 					State:       HtlcStateAccepted,
 					InvoiceKeys: make(map[CircuitKey]struct{}),
 				}
 			}
 
-			if _, ok := ampState.InvoiceKeys[key]; !ok {
-				ampState.InvoiceKeys = make(map[CircuitKey]struct{})
-			}
 			ampState.InvoiceKeys[key] = struct{}{}
 
 			invoice.AMPState[setID] = ampState
 
 			if _, ok := htlcsAmpUpdate[setID]; !ok {
-				// TODO(roasbeef): already in this state?
-				htlcsAmpUpdate[setID] = make(map[CircuitKey]*InvoiceHTLC)
+				// If we're just now creating the HTLCs for
+				// this set then we'll also pull in the
+				// existing HTLCs are part of this set, so we
+				// can write them all to disk together (same
+				// value)
+				//
+				// TODO(roasbeef): alternatively use another
+				// level of prefix based on circuit key?
+				htlcsAmpUpdate[setID] = invoice.HTLCSet(&setID, HtlcStateAccepted)
 			}
 			htlcsAmpUpdate[setID][key] = htlc
 		}
