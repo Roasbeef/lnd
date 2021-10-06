@@ -663,7 +663,7 @@ type InvoiceHtlcAMPData struct {
 	// reconstruction of the shares in the AMP payload.
 	//
 	// NOTE: Preimage will only be present once the HTLC is in
-	// HltcStateSetteled.
+	// HtlcStateSettled.
 	Preimage *lntypes.Preimage
 }
 
@@ -1967,8 +1967,9 @@ func copyInvoice(src *Invoice) *Invoice {
 }
 
 // invoiceSetIDKeyLen is the length of the key that's used to store the
-// individual HTLCs prexfied by their ID DI along side the main invoice within
-// the invoiceBytes. We use 4 bytes for the invoice number, and 32 bytes for the set ID.
+// individual HTLCs prefixed by their ID along side the main invoice within the
+// invoiceBytes. We use 4 bytes for the invoice number, and 32 bytes for the
+// set ID.
 const invoiceSetIDKeyLen = 4 + 32
 
 // updateAMPInvoices updates the set of AMP invoices in-place. For AMP, rather
@@ -2193,9 +2194,12 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 			invoice.State = *newState
 		}
 
-		if update.State.NewState == ContractSettled {
+		// If this is a non-AMP invoice, then the state can eventually
+		// go to ContractSettled, so we pass in  nil value as part of
+		// setSettleMetaFields.
+		if !invoiceIsAMP && update.State.NewState == ContractSettled {
 			err := setSettleMetaFields(
-				settleIndex, invoiceNum, &invoice, now,
+				settleIndex, invoiceNum, &invoice, now, nil,
 			)
 			if err != nil {
 				return nil, err
@@ -2281,10 +2285,8 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		// include accepted htlcs when the invoice is still open, other
 		// than if this is an AMP invoice.
 		var updateAmtPaid bool
-
 		invoiceStateReady := (htlc.State == HtlcStateAccepted ||
 			htlc.State == HtlcStateSettled)
-
 		if !invoiceIsAMP {
 			updateAmtPaid = (invoice.State != ContractOpen &&
 				invoiceStateReady)
@@ -2298,6 +2300,17 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		}
 	}
 	invoice.AmtPaid = amtPaid
+
+	// As we don't update the settle index above for AMP invoices, we'll do
+	// it here for each sub-AMP invoice that was settled.
+	for settledSetID := range settledSetIDs {
+		err := setSettleMetaFields(
+			settleIndex, invoiceNum, &invoice, now, settledSetID[:],
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Reserialize and update invoice.
 	var buf bytes.Buffer
@@ -2531,9 +2544,11 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 }
 
 // setSettleMetaFields updates the metadata associated with settlement of an
-// invoice.
+// invoice. If a non-nil setID is passed in, then the value will be append to
+// the invoice number as well, in order to allow us to detect repeated payments
+// to the same AMP invoices "across time".
 func setSettleMetaFields(settleIndex kvdb.RwBucket, invoiceNum []byte,
-	invoice *Invoice, now time.Time) error {
+	invoice *Invoice, now time.Time, setID []byte) error {
 
 	// Now that we know the invoice hasn't already been settled, we'll
 	// update the settle index so we can place this settle event in the
@@ -2541,6 +2556,17 @@ func setSettleMetaFields(settleIndex kvdb.RwBucket, invoiceNum []byte,
 	nextSettleSeqNo, err := settleIndex.NextSequence()
 	if err != nil {
 		return err
+	}
+
+	// Make a new byte array on the stack that can potentially store the 4
+	// byte invoice number along w/ the 32 byte set ID. We capture valueLen
+	// here which is the number of bytes copied so we can only store the 4
+	// bytes if this is a non-AMP invoice.
+	var indexKey [invoiceSetIDKeyLen]byte
+	valueLen := copy(indexKey[:], invoiceNum[:])
+
+	if len(setID) != 0 {
+		valueLen += copy(indexKey[valueLen:], setID)
 	}
 
 	var seqNoBytes [8]byte
