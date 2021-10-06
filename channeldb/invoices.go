@@ -2186,8 +2186,10 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		// If this isn't an AMP invoice, then we'll go ahead and update
 		// the invoice state directly here. For AMP invoices, we
 		// instead will keep the top-level invoice open, and instead
-		// update the state of each _htlc set_ instead.
-		if !invoiceIsAMP {
+		// update the state of each _htlc set_ instead. However, we'll
+		// allow the invoice to transition to the cancelled state
+		// regardless.
+		if !invoiceIsAMP || *newState == ContractCanceled {
 			invoice.State = *newState
 		}
 
@@ -2201,10 +2203,21 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		}
 	}
 
-	// With any invoice level state transitions recorded, we'll now finalize
-	// the process by updating the state transitions for individual HTLCs
-	// and recalculate the total amount paid to the invoice.
-	var amtPaid lnwire.MilliSatoshi
+	// The set of HTLC pre-images will only be set if we were actually able
+	// to reconstruct all the AMP pre-images.
+	var settleEligibleAMP bool
+	if update != nil && update.State != nil {
+		settleEligibleAMP = len(update.State.HTLCPreimages) != 0
+	}
+
+	// With any invoice level state transitions recorded, we'll now
+	// finalize the process by updating the state transitions for
+	// individual HTLCs and recalculate the total amount paid to the
+	// invoice.
+	var (
+		amtPaid       lnwire.MilliSatoshi
+		settledSetIDs = make(map[SetID]struct{})
+	)
 	for key, htlc := range invoice.Htlcs {
 		// Set the HTLC preimage for any AMP HTLCs.
 		if setID != nil {
@@ -2227,14 +2240,25 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 		// The invoice state may have changed and this could have
 		// implications for the states of the individual htlcs. Align
 		// the htlc state with the current invoice state.
-		err := updateHtlc(now, htlc, invoice.State, setID)
+		//
+		// If we have all the pre-images for an AMP invoice, then we'll
+		// act as if we're able to settle the entire invoice. We need
+		// to do this since it's possible for us to settle AMP invoices
+		// while the contract state (on disk) is still in the accept
+		// state.
+		htlcContextState := invoice.State
+		if settleEligibleAMP {
+			htlcContextState = ContractSettled
+		}
+		htlcSettled, err := updateHtlc(now, htlc, htlcContextState, setID)
 		if err != nil {
 			return nil, err
 		}
 
-		if invoiceIsAMP {
-			setID := htlc.AMP.Record.SetID()
-			ampState := invoice.AMPState[setID]
+		if htlcSettled && invoiceIsAMP {
+			settledSetIDs[*setID] = struct{}{}
+
+			ampState := invoice.AMPState[*setID]
 
 			ampState.State = HtlcStateSettled
 			if _, ok := ampState.InvoiceKeys[key]; !ok {
@@ -2242,7 +2266,13 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, invoices,
 			}
 			ampState.InvoiceKeys[key] = struct{}{}
 
-			invoice.AMPState[setID] = ampState
+			invoice.AMPState[*setID] = ampState
+
+			if _, ok := htlcsAmpUpdate[*setID]; !ok {
+				htlcsAmpUpdate[*setID] = make(map[CircuitKey]*InvoiceHTLC)
+			}
+
+			htlcsAmpUpdate[*setID][key] = htlc
 		}
 
 		// TODO(roasbeef): also add an include settleIndex within HTLC value
@@ -2405,13 +2435,14 @@ func cancelSingleHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 	return nil
 }
 
-// updateHtlc aligns the state of an htlc with the given invoice state.
+// updateHtlc aligns the state of an htlc with the given invoice state. A
+// boolean is returned if the HTLC was settled.
 func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
-	invState ContractState, setID *[32]byte) error {
+	invState ContractState, setID *[32]byte) (bool, error) {
 
-	trySettle := func(persist bool) error {
+	trySettle := func(persist bool) (bool, error) {
 		if htlc.State != HtlcStateAccepted {
-			return nil
+			return false, nil
 		}
 
 		// Settle the HTLC if it matches the settled set id. Since we
@@ -2436,12 +2467,12 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			//
 			// Fail if an accepted AMP HTLC has no preimage.
 			case htlc.AMP.Preimage == nil:
-				return ErrHTLCPreimageMissing
+				return false, ErrHTLCPreimageMissing
 
 			// Fail if the accepted AMP HTLC has an invalid
 			// preimage.
 			case !htlc.AMP.Preimage.Matches(htlc.AMP.Hash):
-				return ErrHTLCPreimageMismatch
+				return false, ErrHTLCPreimageMismatch
 			}
 
 			htlcState = HtlcStateSettled
@@ -2456,7 +2487,7 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			htlc.ResolveTime = resolveTime
 		}
 
-		return nil
+		return persist && htlcState == HtlcStateSettled, nil
 	}
 
 	if invState == ContractSettled {
@@ -2470,7 +2501,7 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 	// We should never find a settled HTLC on an invoice that isn't in
 	// ContractSettled.
 	if htlc.State == HtlcStateSettled {
-		return ErrHTLCAlreadySettled
+		return false, ErrHTLCAlreadySettled
 	}
 
 	switch invState {
@@ -2480,8 +2511,9 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			htlc.State = HtlcStateCanceled
 			htlc.ResolveTime = resolveTime
 		}
-		return nil
+		return false, nil
 
+		// TODO(roasbeef): never fully passed thru now?
 	case ContractAccepted:
 		// Check that we can settle the HTLCs. For legacy and MPP HTLCs
 		// this will be a NOP, but for AMP HTLCs this asserts that we
@@ -2491,10 +2523,10 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 		return trySettle(false)
 
 	case ContractOpen:
-		return nil
+		return false, nil
 
 	default:
-		return errors.New("unknown state transition")
+		return false, errors.New("unknown state transition")
 	}
 }
 
