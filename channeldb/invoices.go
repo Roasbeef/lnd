@@ -2445,9 +2445,10 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			return false, nil
 		}
 
-		// Settle the HTLC if it matches the settled set id. Since we
-		// only allow settling of one HTLC set (for now) we cancel any
-		// that do not match the set id.
+		// Settle the HTLC if it matches the settled set id. If
+		// there're other HTLCs with distinct setIDs, then we'll leave
+		// them, as they may eventually be settled as we permit
+		// multiple settles to a single pay_addr for AMP.
 		var htlcState HtlcState
 		if htlc.IsInHTLCSet(setID) {
 			// Non-AMP HTLCs can be settled immediately since we
@@ -2461,7 +2462,7 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			// the invoice level.
 			case setID == nil:
 
-			// At this popint, the setID is non-nil, meaning this is
+			// At this point, the setID is non-nil, meaning this is
 			// an AMP HTLC. We know that htlc.AMP cannot be nil,
 			// otherwise IsInHTLCSet would have returned false.
 			//
@@ -2476,13 +2477,12 @@ func updateHtlc(resolveTime time.Time, htlc *InvoiceHTLC,
 			}
 
 			htlcState = HtlcStateSettled
-		} else {
-			htlcState = HtlcStateCanceled
 		}
 
 		// Only persist the changes if the invoice is moving to the
-		// settled state.
-		if persist {
+		// settled state, and we're actually updating the state to
+		// settled.
+		if persist && htlcState == HtlcStateSettled {
 			htlc.State = htlcState
 			htlc.ResolveTime = resolveTime
 		}
@@ -2545,7 +2545,7 @@ func setSettleMetaFields(settleIndex kvdb.RwBucket, invoiceNum []byte,
 
 	var seqNoBytes [8]byte
 	byteOrder.PutUint64(seqNoBytes[:], nextSettleSeqNo)
-	if err := settleIndex.Put(seqNoBytes[:], invoiceNum); err != nil {
+	if err := settleIndex.Put(seqNoBytes[:], indexKey[:valueLen]); err != nil {
 		return err
 	}
 
