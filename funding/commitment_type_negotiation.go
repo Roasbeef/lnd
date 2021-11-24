@@ -36,25 +36,6 @@ func negotiateCommitmentType(channelType *lnwire.ChannelType,
 				*channelType, local, remote,
 			)
 		}
-
-		// If they don't know explicit negotiation, let's fall back to
-		// implicit negotiation if they just signal one of the known
-		// default types.
-		channelFeatures := lnwire.RawFeatureVector(*channelType)
-		staticRemoteKeyOnly := channelFeatures.OnlyContains(
-			lnwire.StaticRemoteKeyRequired,
-		)
-		anchorOnly := channelFeatures.OnlyContains(
-			lnwire.AnchorsZeroFeeHtlcTxRequired,
-		)
-
-		// It's one of the default types.
-		if staticRemoteKeyOnly || anchorOnly {
-			return implicitNegotiateCommitmentType(local, remote), nil
-		}
-
-		// Something's weird, let's not accept this channel.
-		return 0, errUnsupportedExplicitNegotiation
 	}
 
 	return implicitNegotiateCommitmentType(local, remote), nil
