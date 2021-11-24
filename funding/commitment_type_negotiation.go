@@ -29,12 +29,32 @@ func negotiateCommitmentType(channelType *lnwire.ChannelType,
 	local, remote *lnwire.FeatureVector) (lnwallet.CommitmentType, error) {
 
 	if channelType != nil {
-		if !hasFeatures(local, remote, lnwire.ExplicitChannelTypeOptional) {
-			return 0, errUnsupportedExplicitNegotiation
+		// If the peer does know explicit negotiation, let's attempt
+		// that now.
+		if hasFeatures(local, remote, lnwire.ExplicitChannelTypeOptional) {
+			return explicitNegotiateCommitmentType(
+				*channelType, local, remote,
+			)
 		}
-		return explicitNegotiateCommitmentType(
-			*channelType, local, remote,
+
+		// If they don't know explicit negotiation, let's fall back to
+		// implicit negotiation if they just signal one of the known
+		// default types.
+		channelFeatures := lnwire.RawFeatureVector(*channelType)
+		staticRemoteKeyOnly := channelFeatures.OnlyContains(
+			lnwire.StaticRemoteKeyRequired,
 		)
+		anchorOnly := channelFeatures.OnlyContains(
+			lnwire.AnchorsZeroFeeHtlcTxRequired,
+		)
+
+		// It's one of the default types.
+		if staticRemoteKeyOnly || anchorOnly {
+			return implicitNegotiateCommitmentType(local, remote), nil
+		}
+
+		// Something's weird, let's not accept this channel.
+		return 0, errUnsupportedExplicitNegotiation
 	}
 
 	return implicitNegotiateCommitmentType(local, remote), nil
