@@ -127,6 +127,10 @@ default](https://github.com/lightningnetwork/lnd/pull/6810) in most cases.
 
 ## Bug Fixes
 
+* [A nil-check](https://github.com/lightningnetwork/lnd/pull/6624) is added
+  when querying htlc entry from the remote update logs to avoid panic during
+  startup.
+
 * [LND no longer creates non-standard transactions when calling SendCoins with the
   all flag. This would manifest with p2wsh/p2pkh output scripts at
   1sat/vbyte.](https://github.com/lightningnetwork/lnd/pull/6740)
