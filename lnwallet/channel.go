@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/txsort"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
@@ -803,7 +804,6 @@ func (lc *LightningChannel) diskHtlcToPayDesc(feeRate chainfee.SatPerKWeight,
 		ourP2WSH, theirP2WSH                 []byte
 		ourWitnessScript, theirWitnessScript []byte
 		pd                                   PaymentDescriptor
-		err                                  error
 		chanType                             = lc.channelState.ChanType
 	)
 
@@ -817,26 +817,30 @@ func (lc *LightningChannel) diskHtlcToPayDesc(feeRate chainfee.SatPerKWeight,
 		htlc.Amt.ToSatoshis(), lc.channelState.LocalChanCfg.DustLimit,
 	)
 	if !isDustLocal && localCommitKeys != nil {
-		ourP2WSH, ourWitnessScript, err = genHtlcScript(
+		scriptInfo, err := genHtlcScript(
 			chanType, htlc.Incoming, true, htlc.RefundTimeout,
 			htlc.RHash, localCommitKeys,
 		)
 		if err != nil {
 			return pd, err
 		}
+		ourP2WSH = scriptInfo.PkScript()
+		ourWitnessScript = scriptInfo.WitnessScriptToSign()
 	}
 	isDustRemote := HtlcIsDust(
 		chanType, htlc.Incoming, false, feeRate,
 		htlc.Amt.ToSatoshis(), lc.channelState.RemoteChanCfg.DustLimit,
 	)
 	if !isDustRemote && remoteCommitKeys != nil {
-		theirP2WSH, theirWitnessScript, err = genHtlcScript(
+		scriptInfo, err := genHtlcScript(
 			chanType, htlc.Incoming, false, htlc.RefundTimeout,
 			htlc.RHash, remoteCommitKeys,
 		)
 		if err != nil {
 			return pd, err
 		}
+		theirP2WSH = scriptInfo.PkScript()
+		theirWitnessScript = scriptInfo.WitnessScriptToSign()
 	}
 
 	// Reconstruct the proper local/remote output indexes from the HTLC's
@@ -1565,7 +1569,7 @@ func (lc *LightningChannel) logUpdateToPayDesc(logUpdate *channeldb.LogUpdate,
 			wireMsg.Amount.ToSatoshis(), remoteDustLimit,
 		)
 		if !isDustRemote {
-			theirP2WSH, theirWitnessScript, err := genHtlcScript(
+			scriptInfo, err := genHtlcScript(
 				lc.channelState.ChanType, false, false,
 				wireMsg.Expiry, wireMsg.PaymentHash,
 				remoteCommitKeys,
@@ -1574,8 +1578,8 @@ func (lc *LightningChannel) logUpdateToPayDesc(logUpdate *channeldb.LogUpdate,
 				return nil, err
 			}
 
-			pd.theirPkScript = theirP2WSH
-			pd.theirWitnessScript = theirWitnessScript
+			pd.theirPkScript = scriptInfo.PkScript()
+			pd.theirWitnessScript = scriptInfo.WitnessScriptToSign()
 		}
 
 	// For HTLC's we're offered we'll fetch the original offered HTLC
@@ -2318,6 +2322,11 @@ type HtlcRetribution struct {
 	// update the SignDesc above accordingly to sweep properly.
 	SecondLevelWitnessScript []byte
 
+	// SecondLevelTapTweak is the tap tweak value needed to spend the
+	// second level output in case the breaching party attempts to publish
+	// it.
+	SecondLevelTapTweak [32]byte
+
 	// IsIncoming is a boolean flag that indicates whether or not this
 	// HTLC was accepted from the counterparty. A false value indicates that
 	// this HTLC was offered by us. This flag is used determine the exact
@@ -2506,31 +2515,92 @@ func NewBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
 	// If our balance exceeds the remote party's dust limit, instantiate
 	// the sign descriptor for our output.
 	if ourAmt >= int64(chanState.RemoteChanCfg.DustLimit) {
+		// As we're about to sweep our own output w/o a delay, we'll
+		// obtain the witness script for the success/delay path.
+		witnessScript, err := ourScript.WitnessScriptForPath(
+			input.ScriptPathDelay,
+		)
+		if err != nil {
+			return nil, err
+		}
+
 		br.LocalOutputSignDesc = &input.SignDescriptor{
 			SingleTweak:   keyRing.LocalCommitKeyTweak,
 			KeyDesc:       chanState.LocalChanCfg.PaymentBasePoint,
-			WitnessScript: ourScript.WitnessScript,
+			WitnessScript: witnessScript,
 			Output: &wire.TxOut{
-				PkScript: ourScript.PkScript,
+				PkScript: ourScript.PkScript(),
 				Value:    ourAmt,
 			},
-			HashType: txscript.SigHashAll,
+			HashType: sweepSigHash(chanState.ChanType),
+		}
+
+		// For taproot channels, we'll make sure to set the script path
+		// spend (as our output on their revoked tx still needs the
+		// delay), and set the control block.
+		if scriptTree, ok := ourScript.(input.TapscriptDescriptor); ok {
+			//nolint:lll
+			br.LocalOutputSignDesc.SignMethod = input.TaprootScriptSpendSignMethod
+
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				input.ScriptPathDelay,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			//nolint:lll
+			br.LocalOutputSignDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	// Similarly, if their balance exceeds the remote party's dust limit,
 	// assemble the sign descriptor for their output, which we can sweep.
 	if theirAmt >= int64(chanState.RemoteChanCfg.DustLimit) {
+		// As we're trying to defend the channel against a breach
+		// attempt from the remote party, we want to obain the
+		// revocation witness script here.
+		witnessScript, err := theirScript.WitnessScriptForPath(
+			input.ScriptPathRevocation,
+		)
+		if err != nil {
+			return nil, err
+		}
+
 		br.RemoteOutputSignDesc = &input.SignDescriptor{
 			KeyDesc: chanState.LocalChanCfg.
 				RevocationBasePoint,
 			DoubleTweak:   commitmentSecret,
-			WitnessScript: theirScript.WitnessScript,
+			WitnessScript: witnessScript,
 			Output: &wire.TxOut{
-				PkScript: theirScript.PkScript,
+				PkScript: theirScript.PkScript(),
 				Value:    theirAmt,
 			},
-			HashType: txscript.SigHashAll,
+			HashType: sweepSigHash(chanState.ChanType),
+		}
+
+		// For taproot channels, the remote output (the revoked output)
+		// is spent with a script path to ensure all information 3rd
+		// parties need to sweep anchors is revealed on chain.
+		scriptTree, ok := theirScript.(input.TapscriptDescriptor)
+		if ok {
+			//nolint:lll
+			br.RemoteOutputSignDesc.SignMethod = input.TaprootScriptSpendSignMethod
+
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				input.ScriptPathRevocation,
+			)
+			if err != nil {
+				return nil, err
+			}
+			//nolint:lll
+			br.RemoteOutputSignDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -2574,7 +2644,7 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 	// HTLC script. Otherwise, is this was an outgoing HTLC that we sent,
 	// then from the PoV of the remote commitment state, they're the
 	// receiver of this HTLC.
-	htlcPkScript, htlcWitnessScript, err := genHtlcScript(
+	scriptInfo, err := genHtlcScript(
 		chanState.ChanType, htlc.Incoming, false,
 		htlc.RefundTimeout, htlc.RHash, keyRing,
 	)
@@ -2582,24 +2652,51 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 		return emptyRetribution, err
 	}
 
-	return HtlcRetribution{
-		SignDesc: input.SignDescriptor{
-			KeyDesc: chanState.LocalChanCfg.
-				RevocationBasePoint,
-			DoubleTweak:   commitmentSecret,
-			WitnessScript: htlcWitnessScript,
-			Output: &wire.TxOut{
-				PkScript: htlcPkScript,
-				Value:    int64(htlc.Amt),
-			},
-			HashType: txscript.SigHashAll,
+	signDesc := input.SignDescriptor{
+		KeyDesc: chanState.LocalChanCfg.
+			RevocationBasePoint,
+		DoubleTweak:   commitmentSecret,
+		WitnessScript: scriptInfo.WitnessScriptToSign(),
+		Output: &wire.TxOut{
+			PkScript: scriptInfo.PkScript(),
+			Value:    int64(htlc.Amt),
 		},
+		HashType: sweepSigHash(chanState.ChanType),
+	}
+
+	// For taproot HTLC outputs, we need to set the sign method to key
+	// spend, and also set the tap tweak root needed to derive the proper
+	// private key.
+	if scriptTree, ok := scriptInfo.(input.TapscriptDescriptor); ok {
+		signDesc.SignMethod = input.TaprootKeySpendSignMethod
+
+		signDesc.TapTweak = scriptTree.TapTweak()
+	}
+
+	// The second level script we sign will always be the success path.
+	secondLevelWitnessScript, err := secondLevelScript.WitnessScriptForPath(
+		input.ScriptPathSuccess,
+	)
+	if err != nil {
+		return emptyRetribution, err
+	}
+
+	// If this is a taproot output, we'll also need to obtain the second
+	// level tap tweak as well.
+	var secondLevelTapTweak [32]byte
+	if scriptTree, ok := secondLevelScript.(input.TapscriptDescriptor); ok {
+		copy(secondLevelTapTweak[:], scriptTree.TapTweak())
+	}
+
+	return HtlcRetribution{
+		SignDesc: signDesc,
 		OutPoint: wire.OutPoint{
 			Hash:  commitHash,
 			Index: uint32(htlc.OutputIndex),
 		},
-		SecondLevelWitnessScript: secondLevelScript.WitnessScript,
+		SecondLevelWitnessScript: secondLevelWitnessScript,
 		IsIncoming:               htlc.Incoming,
+		SecondLevelTapTweak:      secondLevelTapTweak,
 	}, nil
 }
 
@@ -2721,7 +2818,7 @@ func createBreachRetribution(revokedLog *channeldb.RevocationLog,
 func createBreachRetributionLegacy(revokedLog *channeldb.ChannelCommitment,
 	chanState *channeldb.OpenChannel, keyRing *CommitmentKeyRing,
 	commitmentSecret *btcec.PrivateKey,
-	ourScript, theirScript *ScriptInfo,
+	ourScript, theirScript input.ScriptDescriptor,
 	leaseExpiry uint32) (*BreachRetribution, int64, int64, error) {
 
 	commitHash := revokedLog.CommitTx.TxHash()
@@ -2736,9 +2833,9 @@ func createBreachRetributionLegacy(revokedLog *channeldb.ChannelCommitment,
 	// to find the exact index of the commitment outputs.
 	for i, txOut := range revokedLog.CommitTx.TxOut {
 		switch {
-		case bytes.Equal(txOut.PkScript, ourScript.PkScript):
+		case bytes.Equal(txOut.PkScript, ourScript.PkScript()):
 			ourOutpoint.Index = uint32(i)
-		case bytes.Equal(txOut.PkScript, theirScript.PkScript):
+		case bytes.Equal(txOut.PkScript, theirScript.PkScript()):
 			theirOutpoint.Index = uint32(i)
 		}
 	}
@@ -2982,6 +3079,9 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 	return c, nil
 }
 
+// fundingTxIn returns the funding output as a transaction input. The input
+// returned by this function uses a max sequence number, so it isn't able to be
+// used with RBF by default.
 func fundingTxIn(chanState *channeldb.OpenChannel) wire.TxIn {
 	return *wire.NewTxIn(&chanState.FundingOutpoint, nil, nil)
 }
@@ -6136,7 +6236,8 @@ func (lc *LightningChannel) getSignedCommitTx() (*wire.MsgTx, error) {
 			lc.taprootNonceProducer,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("unable to re-derive "+
+				"verification nonce: %w", err)
 		}
 
 		// Now that we have the local nonce, we'll re-create the musig
@@ -6170,7 +6271,8 @@ func (lc *LightningChannel) getSignedCommitTx() (*wire.MsgTx, error) {
 		// half of the signature for the state. We don't capture the
 		// sig as it's stored within the session.
 		if _, err := musigSession.SignCommit(commitTx); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("unable to sign musig2 "+
+				"commitment: %w", err)
 		}
 
 		// The final step is now to combine this signature we generated
@@ -6341,7 +6443,7 @@ func NewUnilateralCloseSummary(chanState *channeldb.OpenChannel, signer input.Si
 	)
 
 	for outputIndex, txOut := range commitTxBroadcast.TxOut {
-		if bytes.Equal(txOut.PkScript, selfScript.PkScript) {
+		if bytes.Equal(txOut.PkScript, selfScript.PkScript()) {
 			selfPoint = &wire.OutPoint{
 				Hash:  *commitSpend.SpenderTxHash,
 				Index: uint32(outputIndex),
@@ -6357,19 +6459,50 @@ func NewUnilateralCloseSummary(chanState *channeldb.OpenChannel, signer input.Si
 	var commitResolution *CommitOutputResolution
 	if selfPoint != nil {
 		localPayBase := chanState.LocalChanCfg.PaymentBasePoint
+
+		// As the remote party has force closed, we just need the
+		// success witness script.
+		witnessScript, err := selfScript.WitnessScriptForPath(
+			input.ScriptPathSuccess,
+		)
+		if err != nil {
+			return nil, err
+		}
+
 		commitResolution = &CommitOutputResolution{
 			SelfOutPoint: *selfPoint,
 			SelfOutputSignDesc: input.SignDescriptor{
 				KeyDesc:       localPayBase,
 				SingleTweak:   keyRing.LocalCommitKeyTweak,
-				WitnessScript: selfScript.WitnessScript,
+				WitnessScript: witnessScript,
 				Output: &wire.TxOut{
 					Value:    localBalance,
-					PkScript: selfScript.PkScript,
+					PkScript: selfScript.PkScript(),
 				},
-				HashType: txscript.SigHashAll,
+				HashType: sweepSigHash(chanState.ChanType),
 			},
 			MaturityDelay: maturityDelay,
+		}
+
+		// For taproot channels, we'll need to set some additional
+		// fields to ensure the output can be swept.
+		//
+		//nolint:lll
+		if scriptTree, ok := selfScript.(input.TapscriptDescriptor); ok {
+			commitResolution.SelfOutputSignDesc.SignMethod =
+				input.TaprootScriptSpendSignMethod
+
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				input.ScriptPathSuccess,
+			)
+			if err != nil {
+				return nil, err
+			}
+			//nolint:lll
+			commitResolution.SelfOutputSignDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -6399,7 +6532,7 @@ func NewUnilateralCloseSummary(chanState *channeldb.OpenChannel, signer input.Si
 	}
 
 	anchorResolution, err := NewAnchorResolution(
-		chanState, commitTxBroadcast, keyRing,
+		chanState, commitTxBroadcast, keyRing, false,
 	)
 	if err != nil {
 		return nil, err
@@ -6544,11 +6677,22 @@ func newOutgoingHtlcResolution(signer input.Signer,
 		Index: uint32(htlc.OutputIndex),
 	}
 
-	// First, we'll re-generate the script used to send the HTLC to
-	// the remote party within their commitment transaction.
-	htlcScriptHash, htlcScript, err := genHtlcScript(
+	// First, we'll re-generate the script used to send the HTLC to the
+	// remote party within their commitment transaction.
+	htlcScriptInfo, err := genHtlcScript(
 		chanType, false, localCommit, htlc.RefundTimeout, htlc.RHash,
 		keyRing,
+	)
+	if err != nil {
+		return nil, err
+	}
+	htlcPkScript := htlcScriptInfo.PkScript()
+
+	// As this is an outgoing HTLC, we just care about the timeout path
+	// here.
+	scriptPath := input.ScriptPathTimeout
+	htlcWitnessScript, err := htlcScriptInfo.WitnessScriptForPath(
+		scriptPath,
 	)
 	if err != nil {
 		return nil, err
@@ -6560,20 +6704,42 @@ func newOutgoingHtlcResolution(signer input.Signer,
 	if !localCommit {
 		// With the script generated, we can completely populated the
 		// SignDescriptor needed to sweep the output.
+		prevFetcher := txscript.NewCannedPrevOutputFetcher(
+			htlcPkScript, int64(htlc.Amt.ToSatoshis()),
+		)
+		signDesc := input.SignDescriptor{
+			KeyDesc:       localChanCfg.HtlcBasePoint,
+			SingleTweak:   keyRing.LocalHtlcKeyTweak,
+			WitnessScript: htlcWitnessScript,
+			Output: &wire.TxOut{
+				PkScript: htlcPkScript,
+				Value:    int64(htlc.Amt.ToSatoshis()),
+			},
+			HashType:          sweepSigHash(chanType),
+			PrevOutputFetcher: prevFetcher,
+		}
+
+		scriptTree, ok := htlcScriptInfo.(input.TapscriptDescriptor)
+		if ok {
+			signDesc.SignMethod = input.TaprootScriptSpendSignMethod
+
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				scriptPath,
+			)
+			if err != nil {
+				return nil, err
+			}
+			signDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		return &OutgoingHtlcResolution{
 			Expiry:        htlc.RefundTimeout,
 			ClaimOutpoint: op,
-			SweepSignDesc: input.SignDescriptor{
-				KeyDesc:       localChanCfg.HtlcBasePoint,
-				SingleTweak:   keyRing.LocalHtlcKeyTweak,
-				WitnessScript: htlcScript,
-				Output: &wire.TxOut{
-					PkScript: htlcScriptHash,
-					Value:    int64(htlc.Amt.ToSatoshis()),
-				},
-				HashType: txscript.SigHashAll,
-			},
-			CsvDelay: HtlcSecondLevelInputSequence(chanType),
+			SweepSignDesc: signDesc,
+			CsvDelay:      HtlcSecondLevelInputSequence(chanType),
 		}, nil
 	}
 
@@ -6601,17 +6767,22 @@ func newOutgoingHtlcResolution(signer input.Signer,
 	// that's capable of generating the signature required to spend the
 	// HTLC output using the timeout transaction.
 	txOut := commitTx.TxOut[htlc.OutputIndex]
+	prevFetcher := txscript.NewCannedPrevOutputFetcher(
+		txOut.PkScript, txOut.Value,
+	)
+	hashCache := txscript.NewTxSigHashes(timeoutTx, prevFetcher)
 	timeoutSignDesc := input.SignDescriptor{
-		KeyDesc:       localChanCfg.HtlcBasePoint,
-		SingleTweak:   keyRing.LocalHtlcKeyTweak,
-		WitnessScript: htlcScript,
-		Output:        txOut,
-		HashType:      txscript.SigHashAll,
-		SigHashes:     input.NewTxSigHashesV0Only(timeoutTx),
-		InputIndex:    0,
+		KeyDesc:           localChanCfg.HtlcBasePoint,
+		SingleTweak:       keyRing.LocalHtlcKeyTweak,
+		WitnessScript:     htlcWitnessScript,
+		Output:            txOut,
+		HashType:          sweepSigHash(chanType),
+		PrevOutputFetcher: prevFetcher,
+		SigHashes:         hashCache,
+		InputIndex:        0,
 	}
 
-	htlcSig, err := ecdsa.ParseDERSignature(htlc.Signature)
+	htlcSig, err := input.ParseSignature(htlc.Signature)
 	if err != nil {
 		return nil, err
 	}
@@ -6619,12 +6790,36 @@ func newOutgoingHtlcResolution(signer input.Signer,
 	// With the sign desc created, we can now construct the full witness
 	// for the timeout transaction, and populate it as well.
 	sigHashType := HtlcSigHashType(chanType)
-	timeoutWitness, err := input.SenderHtlcSpendTimeout(
-		htlcSig, sigHashType, signer, &timeoutSignDesc, timeoutTx,
-	)
+	var timeoutWitness wire.TxWitness
+	if scriptTree, ok := htlcScriptInfo.(input.TapscriptDescriptor); ok {
+		timeoutSignDesc.SignMethod = input.TaprootScriptSpendSignMethod
+
+		timeoutWitness, err = input.SenderHTLCScriptTaprootTimeout(
+			htlcSig, sigHashType, signer, &timeoutSignDesc,
+			timeoutTx, keyRing.RevocationKey,
+			scriptTree.TapScriptTree(),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// The control block is always the final element of the witness
+		// stack. We set this here as eventually the sweeper will need
+		// to re-sign, so it needs the isolated control block.
+		//
+		// TODO(roasbeef): move this into input.go?
+		ctlrBlkIdx := len(timeoutWitness) - 1
+		timeoutSignDesc.ControlBlock = timeoutWitness[ctlrBlkIdx]
+	} else {
+		timeoutWitness, err = input.SenderHtlcSpendTimeout(
+			htlcSig, sigHashType, signer, &timeoutSignDesc,
+			timeoutTx,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
+
 	timeoutTx.TxIn[0].Witness = timeoutWitness
 
 	// If this is an anchor type channel, the sign details will let us
@@ -6636,9 +6831,48 @@ func newOutgoingHtlcResolution(signer input.Signer,
 	// Finally, we'll generate the script output that the timeout
 	// transaction creates so we can generate the signDesc required to
 	// complete the claim process after a delay period.
-	htlcSweepScript, err := SecondLevelHtlcScript(
-		chanType, isCommitFromInitiator, keyRing.RevocationKey,
-		keyRing.ToLocalKey, csvDelay, leaseExpiry,
+	var (
+		htlcSweepScript input.ScriptDescriptor
+		signMethod      input.SignMethod
+		ctrlBlock       []byte
+	)
+	if !chanType.IsTaproot() {
+		htlcSweepScript, err = SecondLevelHtlcScript(
+			chanType, isCommitFromInitiator, keyRing.RevocationKey,
+			keyRing.ToLocalKey, csvDelay, leaseExpiry,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		//nolint:lll
+		secondLevelScriptTree, err := input.TaprootSecondLevelScriptTree(
+			keyRing.RevocationKey, keyRing.ToLocalKey, csvDelay,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		signMethod = input.TaprootScriptSpendSignMethod
+
+		controlBlock, err := secondLevelScriptTree.CtrlBlockForPath(
+			input.ScriptPathSuccess,
+		)
+		if err != nil {
+			return nil, err
+		}
+		ctrlBlock, err = controlBlock.ToBytes()
+		if err != nil {
+			return nil, err
+		}
+
+		htlcSweepScript = secondLevelScriptTree
+	}
+
+	// In this case, the witness script that needs to be signed will always
+	// be that of the success path.
+	htlcSweepWitnessScript, err := htlcSweepScript.WitnessScriptForPath(
+		input.ScriptPathSuccess,
 	)
 	if err != nil {
 		return nil, err
@@ -6659,12 +6893,18 @@ func newOutgoingHtlcResolution(signer input.Signer,
 		SweepSignDesc: input.SignDescriptor{
 			KeyDesc:       localChanCfg.DelayBasePoint,
 			SingleTweak:   localDelayTweak,
-			WitnessScript: htlcSweepScript.WitnessScript,
+			WitnessScript: htlcSweepWitnessScript,
 			Output: &wire.TxOut{
-				PkScript: htlcSweepScript.PkScript,
+				PkScript: htlcSweepScript.PkScript(),
 				Value:    int64(secondLevelOutputAmt),
 			},
-			HashType: txscript.SigHashAll,
+			HashType: sweepSigHash(chanType),
+			PrevOutputFetcher: txscript.NewCannedPrevOutputFetcher(
+				htlcSweepScript.PkScript(),
+				int64(secondLevelOutputAmt),
+			),
+			SignMethod:   signMethod,
+			ControlBlock: ctrlBlock,
 		},
 	}, nil
 }
@@ -6690,9 +6930,21 @@ func newIncomingHtlcResolution(signer input.Signer,
 
 	// First, we'll re-generate the script the remote party used to
 	// send the HTLC to us in their commitment transaction.
-	htlcScriptHash, htlcScript, err := genHtlcScript(
+	scriptInfo, err := genHtlcScript(
 		chanType, true, localCommit, htlc.RefundTimeout, htlc.RHash,
 		keyRing,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	htlcPkScript := scriptInfo.PkScript()
+
+	// As this is an incoming HTLC, we're attempting to sweep with the
+	// success path.
+	scriptPath := input.ScriptPathSuccess
+	htlcWitnessScript, err := scriptInfo.WitnessScriptForPath(
+		scriptPath,
 	)
 	if err != nil {
 		return nil, err
@@ -6703,31 +6955,53 @@ func newIncomingHtlcResolution(signer input.Signer,
 	if !localCommit {
 		// With the script generated, we can completely populated the
 		// SignDescriptor needed to sweep the output.
+		prevFetcher := txscript.NewCannedPrevOutputFetcher(
+			htlcPkScript, int64(htlc.Amt.ToSatoshis()),
+		)
+		signDesc := input.SignDescriptor{
+			KeyDesc:       localChanCfg.HtlcBasePoint,
+			SingleTweak:   keyRing.LocalHtlcKeyTweak,
+			WitnessScript: htlcWitnessScript,
+			Output: &wire.TxOut{
+				PkScript: htlcPkScript,
+				Value:    int64(htlc.Amt.ToSatoshis()),
+			},
+			HashType:          sweepSigHash(chanType),
+			PrevOutputFetcher: prevFetcher,
+		}
+
+		//nolint:lll
+		if scriptTree, ok := scriptInfo.(input.TapscriptDescriptor); ok {
+			signDesc.SignMethod = input.TaprootScriptSpendSignMethod
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				scriptPath,
+			)
+			if err != nil {
+				return nil, err
+			}
+			signDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		return &IncomingHtlcResolution{
 			ClaimOutpoint: op,
-			SweepSignDesc: input.SignDescriptor{
-				KeyDesc:       localChanCfg.HtlcBasePoint,
-				SingleTweak:   keyRing.LocalHtlcKeyTweak,
-				WitnessScript: htlcScript,
-				Output: &wire.TxOut{
-					PkScript: htlcScriptHash,
-					Value:    int64(htlc.Amt.ToSatoshis()),
-				},
-				HashType: txscript.SigHashAll,
-			},
-			CsvDelay: HtlcSecondLevelInputSequence(chanType),
+			SweepSignDesc: signDesc,
+			CsvDelay:      HtlcSecondLevelInputSequence(chanType),
 		}, nil
 	}
 
 	// Otherwise, we'll need to go to the second level to sweep this HTLC.
-
+	//
 	// First, we'll reconstruct the original HTLC success transaction,
 	// taking into account the fee rate used.
 	htlcFee := HtlcSuccessFee(chanType, feePerKw)
 	secondLevelOutputAmt := htlc.Amt.ToSatoshis() - htlcFee
 	successTx, err := CreateHtlcSuccessTx(
 		chanType, isCommitFromInitiator, op, secondLevelOutputAmt,
-		csvDelay, leaseExpiry, keyRing.RevocationKey, keyRing.ToLocalKey,
+		csvDelay, leaseExpiry, keyRing.RevocationKey,
+		keyRing.ToLocalKey,
 	)
 	if err != nil {
 		return nil, err
@@ -6736,17 +7010,22 @@ func newIncomingHtlcResolution(signer input.Signer,
 	// Once we've created the second-level transaction, we'll generate the
 	// SignDesc needed spend the HTLC output using the success transaction.
 	txOut := commitTx.TxOut[htlc.OutputIndex]
+	prevFetcher := txscript.NewCannedPrevOutputFetcher(
+		txOut.PkScript, txOut.Value,
+	)
+	hashCache := txscript.NewTxSigHashes(successTx, prevFetcher)
 	successSignDesc := input.SignDescriptor{
-		KeyDesc:       localChanCfg.HtlcBasePoint,
-		SingleTweak:   keyRing.LocalHtlcKeyTweak,
-		WitnessScript: htlcScript,
-		Output:        txOut,
-		HashType:      txscript.SigHashAll,
-		SigHashes:     input.NewTxSigHashesV0Only(successTx),
-		InputIndex:    0,
+		KeyDesc:           localChanCfg.HtlcBasePoint,
+		SingleTweak:       keyRing.LocalHtlcKeyTweak,
+		WitnessScript:     htlcWitnessScript,
+		Output:            txOut,
+		HashType:          sweepSigHash(chanType),
+		PrevOutputFetcher: prevFetcher,
+		SigHashes:         hashCache,
+		InputIndex:        0,
 	}
 
-	htlcSig, err := ecdsa.ParseDERSignature(htlc.Signature)
+	htlcSig, err := input.ParseSignature(htlc.Signature)
 	if err != nil {
 		return nil, err
 	}
@@ -6755,12 +7034,35 @@ func newIncomingHtlcResolution(signer input.Signer,
 	// the success transaction. Don't specify the preimage yet. The preimage
 	// will be supplied by the contract resolver, either directly or when it
 	// becomes known.
+	var successWitness wire.TxWitness
 	sigHashType := HtlcSigHashType(chanType)
-	successWitness, err := input.ReceiverHtlcSpendRedeem(
-		htlcSig, sigHashType, nil, signer, &successSignDesc, successTx,
-	)
-	if err != nil {
-		return nil, err
+	if scriptTree, ok := scriptInfo.(input.TapscriptDescriptor); ok {
+		successSignDesc.SignMethod = input.TaprootScriptSpendSignMethod
+
+		successWitness, err = input.ReceiverHTLCScriptTaprootRedeem(
+			htlcSig, sigHashType, nil, signer, &successSignDesc,
+			successTx, keyRing.RevocationKey,
+			scriptTree.TapScriptTree(),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// The control block is always the final element of the witness
+		// stack. We set this here as eventually the sweeper will need
+		// to re-sign, so it needs the isolated control block.
+		//
+		// TODO(roasbeef): move this into input.go?
+		ctlrBlkIdx := len(successWitness) - 1
+		successSignDesc.ControlBlock = successWitness[ctlrBlkIdx]
+	} else {
+		successWitness, err = input.ReceiverHtlcSpendRedeem(
+			htlcSig, sigHashType, nil, signer, &successSignDesc,
+			successTx,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	successTx.TxIn[0].Witness = successWitness
 
@@ -6773,9 +7075,48 @@ func newIncomingHtlcResolution(signer input.Signer,
 	// Finally, we'll generate the script that the second-level transaction
 	// creates so we can generate the proper signDesc to sweep it after the
 	// CSV delay has passed.
-	htlcSweepScript, err := SecondLevelHtlcScript(
-		chanType, isCommitFromInitiator, keyRing.RevocationKey,
-		keyRing.ToLocalKey, csvDelay, leaseExpiry,
+	var (
+		htlcSweepScript input.ScriptDescriptor
+		signMethod      input.SignMethod
+		ctrlBlock       []byte
+	)
+	if !chanType.IsTaproot() {
+		htlcSweepScript, err = SecondLevelHtlcScript(
+			chanType, isCommitFromInitiator, keyRing.RevocationKey,
+			keyRing.ToLocalKey, csvDelay, leaseExpiry,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		//nolint:lll
+		secondLevelScriptTree, err := input.TaprootSecondLevelScriptTree(
+			keyRing.RevocationKey, keyRing.ToLocalKey, csvDelay,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		signMethod = input.TaprootScriptSpendSignMethod
+
+		controlBlock, err := secondLevelScriptTree.CtrlBlockForPath(
+			input.ScriptPathSuccess,
+		)
+		if err != nil {
+			return nil, err
+		}
+		ctrlBlock, err = controlBlock.ToBytes()
+		if err != nil {
+			return nil, err
+		}
+
+		htlcSweepScript = secondLevelScriptTree
+	}
+
+	// In this case, the witness script that needs to be signed will always
+	// be that of the success path.
+	htlcSweepWitnessScript, err := htlcSweepScript.WitnessScriptForPath(
+		input.ScriptPathSuccess,
 	)
 	if err != nil {
 		return nil, err
@@ -6795,12 +7136,18 @@ func newIncomingHtlcResolution(signer input.Signer,
 		SweepSignDesc: input.SignDescriptor{
 			KeyDesc:       localChanCfg.DelayBasePoint,
 			SingleTweak:   localDelayTweak,
-			WitnessScript: htlcSweepScript.WitnessScript,
+			WitnessScript: htlcSweepWitnessScript,
 			Output: &wire.TxOut{
-				PkScript: htlcSweepScript.PkScript,
+				PkScript: htlcSweepScript.PkScript(),
 				Value:    int64(secondLevelOutputAmt),
 			},
-			HashType: txscript.SigHashAll,
+			HashType: sweepSigHash(chanType),
+			PrevOutputFetcher: txscript.NewCannedPrevOutputFetcher(
+				htlcSweepScript.PkScript(),
+				int64(secondLevelOutputAmt),
+			),
+			SignMethod:   signMethod,
+			ControlBlock: ctrlBlock,
 		},
 	}, nil
 }
@@ -6873,7 +7220,8 @@ func extractHtlcResolutions(feePerKw chainfee.SatPerKWeight, ourCommit bool,
 				ourCommit, isCommitFromInitiator, chanType,
 			)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("incoming resolution "+
+					"failed: %v", err)
 			}
 
 			incomingResolutions = append(incomingResolutions, *ihr)
@@ -6886,7 +7234,8 @@ func extractHtlcResolutions(feePerKw chainfee.SatPerKWeight, ourCommit bool,
 			isCommitFromInitiator, chanType,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("outgoing resolution "+
+				"failed: %v", err)
 		}
 
 		outgoingResolutions = append(outgoingResolutions, *ohr)
@@ -6986,7 +7335,8 @@ func (lc *LightningChannel) ForceClose() (*LocalForceCloseSummary, error) {
 		localCommitment.CommitHeight,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to gen force close "+
+			"summary: %w", err)
 	}
 
 	// Set the channel state to indicate that the channel is now in a
@@ -7042,7 +7392,7 @@ func NewLocalForceCloseSummary(chanState *channeldb.OpenChannel,
 		delayOut   *wire.TxOut
 	)
 	for i, txOut := range commitTx.TxOut {
-		if !bytes.Equal(toLocalScript.PkScript, txOut.PkScript) {
+		if !bytes.Equal(toLocalScript.PkScript(), txOut.PkScript) {
 			continue
 		}
 
@@ -7059,6 +7409,16 @@ func NewLocalForceCloseSummary(chanState *channeldb.OpenChannel,
 	// nil.
 	var commitResolution *CommitOutputResolution
 	if delayOut != nil {
+		// When attempting to sweep our own output, we only need the
+		// witness script for the delay path
+		scriptPath := input.ScriptPathDelay
+		witnessScript, err := toLocalScript.WitnessScriptForPath(
+			scriptPath,
+		)
+		if err != nil {
+			return nil, err
+		}
+
 		localBalance := delayOut.Value
 		commitResolution = &CommitOutputResolution{
 			SelfOutPoint: wire.OutPoint{
@@ -7068,14 +7428,34 @@ func NewLocalForceCloseSummary(chanState *channeldb.OpenChannel,
 			SelfOutputSignDesc: input.SignDescriptor{
 				KeyDesc:       chanState.LocalChanCfg.DelayBasePoint,
 				SingleTweak:   keyRing.LocalCommitKeyTweak,
-				WitnessScript: toLocalScript.WitnessScript,
+				WitnessScript: witnessScript,
 				Output: &wire.TxOut{
 					PkScript: delayOut.PkScript,
 					Value:    localBalance,
 				},
-				HashType: txscript.SigHashAll,
+				HashType: sweepSigHash(chanState.ChanType),
 			},
 			MaturityDelay: csvTimeout,
+		}
+
+		// For taproot channels, we'll need to set some additional
+		// fields to ensure the output can be swept.
+		scriptTree, ok := toLocalScript.(input.TapscriptDescriptor)
+		if ok {
+			commitResolution.SelfOutputSignDesc.SignMethod =
+				input.TaprootScriptSpendSignMethod
+
+			ctrlBlock, err := scriptTree.CtrlBlockForPath(
+				scriptPath,
+			)
+			if err != nil {
+				return nil, err
+			}
+			//nolint:lll
+			commitResolution.SelfOutputSignDesc.ControlBlock, err = ctrlBlock.ToBytes()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -7092,14 +7472,15 @@ func NewLocalForceCloseSummary(chanState *channeldb.OpenChannel,
 		chanState.IsInitiator, leaseExpiry,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to gen htlc resolution: %w", err)
 	}
 
 	anchorResolution, err := NewAnchorResolution(
-		chanState, commitTx, keyRing,
+		chanState, commitTx, keyRing, true,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to gen anchor "+
+			"resolution: %w", err)
 	}
 
 	return &LocalForceCloseSummary{
@@ -7176,10 +7557,17 @@ func (lc *LightningChannel) CreateCloseProposal(proposedFee btcutil.Amount,
 		return nil, nil, 0, err
 	}
 
+	var closeTxOpts []CloseTxOpt
+
+	// If this is a taproot channel, then we use an RBF'able funding input.
+	if lc.channelState.ChanType.IsTaproot() {
+		closeTxOpts = append(closeTxOpts, WithRBFCloseTx())
+	}
+
 	closeTx := CreateCooperativeCloseTx(
 		fundingTxIn(lc.channelState), lc.channelState.LocalChanCfg.DustLimit,
 		lc.channelState.RemoteChanCfg.DustLimit, ourBalance, theirBalance,
-		localDeliveryScript, remoteDeliveryScript,
+		localDeliveryScript, remoteDeliveryScript, closeTxOpts...,
 	)
 
 	// Ensure that the transaction doesn't explicitly violate any
@@ -7255,13 +7643,20 @@ func (lc *LightningChannel) CompleteCooperativeClose(
 		return nil, 0, err
 	}
 
+	var closeTxOpts []CloseTxOpt
+
+	// If this is a taproot channel, then we use an RBF'able funding input.
+	if lc.channelState.ChanType.IsTaproot() {
+		closeTxOpts = append(closeTxOpts, WithRBFCloseTx())
+	}
+
 	// Create the transaction used to return the current settled balance
 	// on this active channel back to both parties. In this current model,
 	// the initiator pays full fees for the cooperative close transaction.
 	closeTx := CreateCooperativeCloseTx(
 		fundingTxIn(lc.channelState), lc.channelState.LocalChanCfg.DustLimit,
 		lc.channelState.RemoteChanCfg.DustLimit, ourBalance, theirBalance,
-		localDeliveryScript, remoteDeliveryScript,
+		localDeliveryScript, remoteDeliveryScript, closeTxOpts...,
 	)
 
 	// Ensure that the transaction doesn't explicitly validate any
@@ -7380,7 +7775,7 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 	)
 	localRes, err := NewAnchorResolution(
 		lc.channelState, lc.channelState.LocalCommitment.CommitTx,
-		localKeyRing,
+		localKeyRing, true,
 	)
 	if err != nil {
 		return nil, err
@@ -7395,7 +7790,7 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 	)
 	remoteRes, err := NewAnchorResolution(
 		lc.channelState, lc.channelState.RemoteCommitment.CommitTx,
-		remoteKeyRing,
+		remoteKeyRing, false,
 	)
 	if err != nil {
 		return nil, err
@@ -7417,7 +7812,7 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 		remotePendingRes, err := NewAnchorResolution(
 			lc.channelState,
 			remotePendingCommit.Commitment.CommitTx,
-			pendingRemoteKeyRing,
+			pendingRemoteKeyRing, false,
 		)
 		if err != nil {
 			return nil, err
@@ -7431,28 +7826,48 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 // NewAnchorResolution returns the information that is required to sweep the
 // local anchor.
 func NewAnchorResolution(chanState *channeldb.OpenChannel,
-	commitTx *wire.MsgTx,
-	keyRing *CommitmentKeyRing) (*AnchorResolution, error) {
+	commitTx *wire.MsgTx, keyRing *CommitmentKeyRing,
+	isLocalCommit bool) (*AnchorResolution, error) {
 
 	// Return nil resolution if the channel has no anchors.
 	if !chanState.ChanType.HasAnchors() {
 		return nil, nil
 	}
 
-	// Derive our local anchor script.
-	localAnchor, _, err := CommitScriptAnchors(
+	// Derive our local anchor script. For taproot channels, rather than
+	// use the same multi-sig key for both commitments, the anchor script
+	// will differ depending on if this is our local or remote
+	// commitment.
+	localAnchor, remoteAnchor, err := CommitScriptAnchors(
 		chanState.ChanType, &chanState.LocalChanCfg,
 		&chanState.RemoteChanCfg, keyRing,
 	)
 	if err != nil {
 		return nil, err
 	}
+	if chanState.ChanType.IsTaproot() && !isLocalCommit {
+		//nolint:ineffassign
+		localAnchor, remoteAnchor = remoteAnchor, localAnchor
+	}
+
+	// TODO(roasbeef): remote anchor not needed above
 
 	// Look up the script on the commitment transaction. It may not be
 	// present if there is no output paying to us.
-	found, index := input.FindScriptOutputIndex(commitTx, localAnchor.PkScript)
+	found, index := input.FindScriptOutputIndex(
+		commitTx, localAnchor.PkScript(),
+	)
 	if !found {
 		return nil, nil
+	}
+
+	// For anchor outputs, we'll only ever care about the success path.
+	// script (sweep after 1 block csv delay).
+	anchorWitnessScript, err := localAnchor.WitnessScriptForPath(
+		input.ScriptPathSuccess,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	outPoint := &wire.OutPoint{
@@ -7463,20 +7878,62 @@ func NewAnchorResolution(chanState *channeldb.OpenChannel,
 	// Instantiate the sign descriptor that allows sweeping of the anchor.
 	signDesc := &input.SignDescriptor{
 		KeyDesc:       chanState.LocalChanCfg.MultiSigKey,
-		WitnessScript: localAnchor.WitnessScript,
+		WitnessScript: anchorWitnessScript,
 		Output: &wire.TxOut{
-			PkScript: localAnchor.PkScript,
+			PkScript: localAnchor.PkScript(),
 			Value:    int64(anchorSize),
 		},
-		HashType: txscript.SigHashAll,
+		HashType: sweepSigHash(chanState.ChanType),
+	}
+
+	// For taproot outputs, we'll need to ensure that the proper sign
+	// method is used, and the tweak as well.
+	if scriptTree, ok := localAnchor.(input.TapscriptDescriptor); ok {
+		signDesc.SignMethod = input.TaprootKeySpendSignMethod
+
+		//nolint:lll
+		signDesc.PrevOutputFetcher = txscript.NewCannedPrevOutputFetcher(
+			localAnchor.PkScript(), int64(anchorSize),
+		)
+
+		// For anchor outputs with taproot channels, the key desc is
+		// also different: we'll just re-use our local delay base point
+		// (which becomes our to local output).
+		if isLocalCommit {
+			// In addition to the sign method, we'll also need to
+			// ensure that the single tweak is set, as with the
+			// current formulation, we'll need to use two levels of
+			// tweaks: the normal LN tweak, and the tapscript
+			// tweak.
+			signDesc.SingleTweak = keyRing.LocalCommitKeyTweak
+
+			signDesc.KeyDesc = chanState.LocalChanCfg.DelayBasePoint
+		} else {
+			// When we're playing the force close of a remote
+			// commitment, as this is a "tweakless" channel type,
+			// we don't need a tweak value at all.
+			//
+			//nolint:lll
+			signDesc.KeyDesc = chanState.LocalChanCfg.PaymentBasePoint
+		}
+
+		// Finally, as this is a keyspend method, we'll need to also
+		// include the taptweak as well.
+		signDesc.TapTweak = scriptTree.TapTweak()
+	}
+
+	var witnessWeight int64
+	if chanState.ChanType.IsTaproot() {
+		witnessWeight = input.TaprootKeyPathWitnessSize
+	} else {
+		witnessWeight = input.WitnessCommitmentTxWeight
 	}
 
 	// Calculate commit tx weight. This commit tx doesn't yet include the
 	// witness spending the funding output, so we add the (worst case)
 	// weight for that too.
 	utx := btcutil.NewTx(commitTx)
-	weight := blockchain.GetTransactionWeight(utx) +
-		input.WitnessCommitmentTxWeight
+	weight := blockchain.GetTransactionWeight(utx) + witnessWeight
 
 	// Calculate commit tx fee.
 	fee := chanState.Capacity
@@ -7816,6 +8273,32 @@ func (lc *LightningChannel) generateRevocation(height uint64) (*lnwire.RevokeAnd
 	return revocationMsg, nil
 }
 
+// closeTxOpts houses the set of options that modify how the cooperative close
+// tx is to be constructed.
+type closeTxOpts struct {
+	// enableRBF indicates whether the cooperative close tx should signal
+	// RBF or not.
+	enableRBF bool
+}
+
+// defaultCloseTxOpts returns a closeTxOpts struct with default values.
+func defaultCloseTxOpts() closeTxOpts {
+	return closeTxOpts{
+		enableRBF: false,
+	}
+}
+
+// CloseTxOpt is a functional option that allows us to modify how the closing
+// transaction is created.
+type CloseTxOpt func(*closeTxOpts)
+
+// WithRBFCloseTx signals that the cooperative close tx should signal RBF.
+func WithRBFCloseTx() CloseTxOpt {
+	return func(o *closeTxOpts) {
+		o.enableRBF = true
+	}
+}
+
 // CreateCooperativeCloseTx creates a transaction which if signed by both
 // parties, then broadcast cooperatively closes an active channel. The creation
 // of the closure transaction is modified by a boolean indicating if the party
@@ -7824,7 +8307,19 @@ func (lc *LightningChannel) generateRevocation(height uint64) (*lnwire.RevokeAnd
 // transaction in full.
 func CreateCooperativeCloseTx(fundingTxIn wire.TxIn,
 	localDust, remoteDust, ourBalance, theirBalance btcutil.Amount,
-	ourDeliveryScript, theirDeliveryScript []byte) *wire.MsgTx {
+	ourDeliveryScript, theirDeliveryScript []byte,
+	closeOpts ...CloseTxOpt) *wire.MsgTx {
+
+	opts := defaultCloseTxOpts()
+	for _, optFunc := range closeOpts {
+		optFunc(&opts)
+	}
+
+	// If RBF is signalled, then we'll modify the sequence to permit
+	// replacement.
+	if opts.enableRBF {
+		fundingTxIn.Sequence = mempool.MaxRBFSequence
+	}
 
 	// Construct the transaction to perform a cooperative closure of the
 	// channel. In the event that one side doesn't have any settled funds

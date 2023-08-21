@@ -451,10 +451,10 @@ func (c *chainWatcher) handleUnknownLocalState(
 		pkScript := output.PkScript
 
 		switch {
-		case bytes.Equal(localScript.PkScript, pkScript):
+		case bytes.Equal(localScript.PkScript(), pkScript):
 			ourCommit = true
 
-		case bytes.Equal(remoteScript.PkScript, pkScript):
+		case bytes.Equal(remoteScript.PkScript(), pkScript):
 			ourCommit = true
 		}
 	}
@@ -881,11 +881,9 @@ func (c *chainWatcher) handlePossibleBreach(commitSpend *chainntnfs.SpendDetail,
 	}
 
 	// Create an AnchorResolution for the breached state.
-	//
-	// TODO(roasbeef): make keyring for taproot chans to pass in instead of
-	// nil
 	anchorRes, err := lnwallet.NewAnchorResolution(
-		c.cfg.chanState, commitSpend.SpendingTx, nil,
+		c.cfg.chanState, commitSpend.SpendingTx, retribution.KeyRing,
+		false,
 	)
 	if err != nil {
 		return false, fmt.Errorf("unable to create anchor "+
