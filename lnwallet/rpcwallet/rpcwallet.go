@@ -255,8 +255,9 @@ func (r *RPCKeyRing) SignPsbt(packet *psbt.Packet) ([]uint32, error) {
 // parameter in FinalizePsbt so we can get rid of this code duplication.
 func (r *RPCKeyRing) FinalizePsbt(packet *psbt.Packet, _ string) error {
 	// Let's check that this is actually something we can and want to sign.
-	// We need at least one input and one output.
-	err := psbt.VerifyInputOutputLen(packet, true, true)
+	// We need at least one input and one output. In addition each
+	// input needs nonWitness Utxo or witness Utxo data specified.
+	err := psbt.InputsReadyToSign(packet)
 	if err != nil {
 		return err
 	}
@@ -656,12 +657,14 @@ func (r *RPCKeyRing) ComputeInputScript(tx *wire.MsgTx,
 func (r *RPCKeyRing) MuSig2CreateSession(bipVersion input.MuSig2Version,
 	keyLoc keychain.KeyLocator, pubKeys []*btcec.PublicKey,
 	tweaks *input.MuSig2Tweaks, otherNonces [][musig2.PubNonceSize]byte,
-	sessionOpts ...musig2.SessionOption) (*input.MuSig2SessionInfo, error) {
+	_ ...musig2.SessionOption) (*input.MuSig2SessionInfo, error) {
 
 	apiVersion, err := signrpc.MarshalMuSig2Version(bipVersion)
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO(roasbeef): proto needs session options to be encoded
 
 	// We need to serialize all data for the RPC call. We can do that by
 	// putting everything directly into the request struct.

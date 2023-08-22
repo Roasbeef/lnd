@@ -1,13 +1,16 @@
 package itest
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/funding"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/labels"
@@ -139,7 +142,7 @@ func testBasicChannelFunding(ht *lntest.HarnessTest) {
 			chansCommitType == lnrpc.CommitmentType_ANCHORS:
 
 		case expType == lnrpc.CommitmentType_STATIC_REMOTE_KEY &&
-			chansCommitType == lnrpc.CommitmentType_STATIC_REMOTE_KEY:
+			chansCommitType == lnrpc.CommitmentType_STATIC_REMOTE_KEY: //nolint:lll
 
 		case expType == lnrpc.CommitmentType_LEGACY &&
 			chansCommitType == lnrpc.CommitmentType_LEGACY:
@@ -218,7 +221,7 @@ func basicChannelFundingTest(ht *lntest.HarnessTest,
 		)
 
 		// Deprecated fields.
-		newResp.Balance += int64(local) // nolint:staticcheck
+		newResp.Balance += int64(local)
 		ht.AssertChannelBalanceResp(node, newResp)
 	}
 
@@ -390,11 +393,6 @@ func testUnconfirmedChannelFunding(ht *lntest.HarnessTest) {
 // testChannelFundingInputTypes tests that any type of supported input type can
 // be used to fund channels.
 func testChannelFundingInputTypes(ht *lntest.HarnessTest) {
-	const (
-		chanAmt  = funding.MaxBtcFundingAmount
-		burnAddr = "bcrt1qxsnqpdc842lu8c0xlllgvejt6rhy49u6fmpgyz"
-	)
-
 	// We'll start off by creating a node for Carol.
 	carol := ht.NewNode("Carol", nil)
 
@@ -776,13 +774,24 @@ func testBatchChanFunding(ht *lntest.HarnessTest) {
 	carol := ht.NewNode("carol", []string{"--minchansize=200000"})
 	dave := ht.NewNode("dave", nil)
 
+	// Next we create a node that will receive a zero-conf channel open from
+	// Alice. We'll create the node with the required parameters.
+	scidAliasArgs := []string{
+		"--protocol.option-scid-alias",
+		"--protocol.zero-conf",
+		"--protocol.anchors",
+	}
+	eve := ht.NewNode("eve", scidAliasArgs)
+
 	alice, bob := ht.Alice, ht.Bob
+	ht.RestartNodeWithExtraArgs(alice, scidAliasArgs)
 
 	// Before we start the test, we'll ensure Alice is connected to Carol
-	// and Dave so she can open channels to both of them (and Bob).
+	// and Dave, so she can open channels to both of them (and Bob).
 	ht.EnsureConnected(alice, bob)
 	ht.EnsureConnected(alice, carol)
 	ht.EnsureConnected(alice, dave)
+	ht.EnsureConnected(alice, eve)
 
 	// Let's create our batch TX request. This first one should fail as we
 	// open a channel to Carol that is too small for her min chan size.
@@ -792,25 +801,50 @@ func testBatchChanFunding(ht *lntest.HarnessTest) {
 		Channels: []*lnrpc.BatchOpenChannel{{
 			NodePubkey:         bob.PubKey[:],
 			LocalFundingAmount: 100_000,
+			BaseFee:            1337,
+			UseBaseFee:         true,
 		}, {
 			NodePubkey:         carol.PubKey[:],
 			LocalFundingAmount: 100_000,
+			FeeRate:            1337,
+			UseFeeRate:         true,
 		}, {
 			NodePubkey:         dave.PubKey[:],
 			LocalFundingAmount: 100_000,
+			BaseFee:            1337,
+			UseBaseFee:         true,
+			FeeRate:            1337,
+			UseFeeRate:         true,
+		}, {
+			NodePubkey:         eve.PubKey[:],
+			LocalFundingAmount: 100_000,
+			Private:            true,
+			ZeroConf:           true,
+			CommitmentType:     lnrpc.CommitmentType_ANCHORS,
 		}},
 	}
 
+	// Check that batch opening fails due to the minchansize requirement.
 	err := alice.RPC.BatchOpenChannelAssertErr(batchReq)
 	require.Contains(ht, err.Error(), "initial negotiation failed")
 
 	// Let's fix the minimum amount for Alice now and try again.
 	batchReq.Channels[1].LocalFundingAmount = 200_000
+
+	// Set up a ChannelAcceptor for Eve to accept a zero-conf opening from
+	// Alice.
+	acceptStream, cancel := eve.RPC.ChannelAcceptor()
+	go acceptChannel(ht.T, true, acceptStream)
+
+	// Batch-open all channels.
 	batchResp := alice.RPC.BatchOpenChannel(batchReq)
-	require.Len(ht, batchResp.PendingChannels, 3)
+	require.Len(ht, batchResp.PendingChannels, 4)
 
 	txHash, err := chainhash.NewHash(batchResp.PendingChannels[0].Txid)
 	require.NoError(ht, err)
+
+	// Remove the ChannelAcceptor.
+	cancel()
 
 	chanPoint1 := &lnrpc.ChannelPoint{
 		FundingTxid: &lnrpc.ChannelPoint_FundingTxidBytes{
@@ -830,12 +864,49 @@ func testBatchChanFunding(ht *lntest.HarnessTest) {
 		},
 		OutputIndex: batchResp.PendingChannels[2].OutputIndex,
 	}
+	chanPoint4 := &lnrpc.ChannelPoint{
+		FundingTxid: &lnrpc.ChannelPoint_FundingTxidBytes{
+			FundingTxidBytes: batchResp.PendingChannels[3].Txid,
+		},
+		OutputIndex: batchResp.PendingChannels[3].OutputIndex,
+	}
 
+	// Ensure that Alice can send funds to Eve via the zero-conf channel
+	// before the batch transaction was mined.
+	ht.AssertTopologyChannelOpen(alice, chanPoint4)
+	eveInvoiceParams := &lnrpc.Invoice{
+		Value:   int64(10_000),
+		Private: true,
+	}
+	eveInvoiceResp := eve.RPC.AddInvoice(eveInvoiceParams)
+	ht.CompletePaymentRequests(
+		alice, []string{eveInvoiceResp.PaymentRequest},
+	)
+
+	// Mine the batch transaction and check the network topology.
 	block := ht.MineBlocksAndAssertNumTxes(6, 1)[0]
 	ht.Miner.AssertTxInBlock(block, txHash)
 	ht.AssertTopologyChannelOpen(alice, chanPoint1)
 	ht.AssertTopologyChannelOpen(alice, chanPoint2)
 	ht.AssertTopologyChannelOpen(alice, chanPoint3)
+
+	// Check if the change type from the batch_open_channel funding is P2TR.
+	rawTx := ht.Miner.GetRawTransaction(txHash)
+	require.Len(ht, rawTx.MsgTx().TxOut, 5)
+
+	// For calculating the change output index we use the formula for the
+	// sum of consecutive of integers (n(n+1)/2). All the channel point
+	// indexes are known, so we just calculate the difference to get the
+	// change output index.
+	// Example: Batch outputs = 4, sum_consecutive_ints(4) = 10
+	// Subtract all other output indices to get the change index:
+	// 10 - 0 - 1 - 2 - 3 = 4
+	changeIndex := uint32(10) - (chanPoint1.OutputIndex +
+		chanPoint2.OutputIndex + chanPoint3.OutputIndex +
+		chanPoint4.OutputIndex)
+	ht.AssertOutputScriptClass(
+		rawTx, changeIndex, txscript.WitnessV1TaprootTy,
+	)
 
 	// With the channel open, ensure that it is counted towards Alice's
 	// total channel balance.
@@ -852,6 +923,28 @@ func testBatchChanFunding(ht *lntest.HarnessTest) {
 	resp := carol.RPC.AddInvoice(invoice)
 	ht.CompletePaymentRequests(alice, []string{resp.PaymentRequest})
 
+	// Confirm that Alice's channel partners see here initial fee settings.
+	ensurePolicy(
+		ht, alice, bob, chanPoint1,
+		lnwire.MilliSatoshi(batchReq.Channels[0].BaseFee),
+		chainreg.DefaultBitcoinFeeRate,
+	)
+	ensurePolicy(
+		ht, alice, carol, chanPoint2,
+		chainreg.DefaultBitcoinBaseFeeMSat,
+		lnwire.MilliSatoshi(batchReq.Channels[1].FeeRate),
+	)
+	ensurePolicy(
+		ht, alice, dave, chanPoint3,
+		lnwire.MilliSatoshi(batchReq.Channels[2].BaseFee),
+		lnwire.MilliSatoshi(batchReq.Channels[2].FeeRate),
+	)
+	ensurePolicy(
+		ht, alice, eve, chanPoint4,
+		chainreg.DefaultBitcoinBaseFeeMSat,
+		chainreg.DefaultBitcoinFeeRate,
+	)
+
 	// To conclude, we'll close the newly created channel between Carol and
 	// Dave. This function will also block until the channel is closed and
 	// will additionally assert the relevant channel closing post
@@ -859,6 +952,27 @@ func testBatchChanFunding(ht *lntest.HarnessTest) {
 	ht.CloseChannel(alice, chanPoint1)
 	ht.CloseChannel(alice, chanPoint2)
 	ht.CloseChannel(alice, chanPoint3)
+	ht.CloseChannel(alice, chanPoint4)
+}
+
+// ensurePolicy ensures that the peer sees alice's channel fee settings.
+func ensurePolicy(ht *lntest.HarnessTest, alice, peer *node.HarnessNode,
+	chanPoint *lnrpc.ChannelPoint, expectedBaseFee lnwire.MilliSatoshi,
+	expectedFeeRate lnwire.MilliSatoshi) {
+
+	channel := ht.AssertChannelExists(peer, chanPoint)
+	policy, err := peer.RPC.LN.GetChanInfo(
+		context.Background(), &lnrpc.ChanInfoRequest{
+			ChanId: channel.ChanId,
+		},
+	)
+	require.NoError(ht, err)
+	alicePolicy := policy.Node1Policy
+	if alice.PubKeyStr == policy.Node2Pub {
+		alicePolicy = policy.Node2Policy
+	}
+	require.EqualValues(ht, expectedBaseFee, alicePolicy.FeeBaseMsat)
+	require.EqualValues(ht, expectedFeeRate, alicePolicy.FeeRateMilliMsat)
 }
 
 // deriveFundingShim creates a channel funding shim by deriving the necessary

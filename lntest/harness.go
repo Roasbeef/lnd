@@ -299,9 +299,6 @@ func (h *HarnessTest) resetStandbyNodes(t *testing.T) {
 		// config for the coming test. This will also inherit the
 		// test's running context.
 		h.RestartNodeWithExtraArgs(hn, hn.Cfg.OriginalExtraArgs)
-
-		// Update the node's internal state.
-		hn.UpdateState()
 	}
 }
 
@@ -433,8 +430,19 @@ func (h *HarnessTest) cleanupStandbyNode(hn *node.HarnessNode) {
 	// Delete all payments made from this test.
 	hn.RPC.DeleteAllPayments()
 
-	// Finally, check the node is in a clean state for the following tests.
-	h.validateNodeState(hn)
+	// Check the node's current state with timeout.
+	//
+	// NOTE: we need to do this in a `wait` because it takes some time for
+	// the node to update its internal state. Once the RPCs are synced we
+	// can then remove this wait.
+	err := wait.NoError(func() error {
+		// Update the node's internal state.
+		hn.UpdateState()
+
+		// Check the node is in a clean state for the following tests.
+		return h.validateNodeState(hn)
+	}, wait.DefaultTimeout)
+	require.NoError(h, err, "timeout checking node's state")
 }
 
 // removeConnectionns will remove all connections made on the standby nodes
@@ -624,16 +632,16 @@ func (h *HarnessTest) newNodeWithSeed(name string,
 // be used for regular rpc operations.
 func (h *HarnessTest) RestoreNodeWithSeed(name string, extraArgs []string,
 	password []byte, mnemonic []string, rootKey string,
-	recoveryWindow int32, chanBackups *lnrpc.ChanBackupSnapshot,
-	opts ...node.Option) *node.HarnessNode {
+	recoveryWindow int32,
+	chanBackups *lnrpc.ChanBackupSnapshot) *node.HarnessNode {
 
-	node, err := h.manager.newNode(h.T, name, extraArgs, password, true)
+	n, err := h.manager.newNode(h.T, name, extraArgs, password, true)
 	require.NoErrorf(h, err, "unable to create new node for %s", name)
 
 	// Start the node with seed only, which will only create the `State`
 	// and `WalletUnlocker` clients.
-	err = node.StartWithNoAuth(h.runCtx)
-	require.NoErrorf(h, err, "failed to start node %s", node.Name())
+	err = n.StartWithNoAuth(h.runCtx)
+	require.NoErrorf(h, err, "failed to start node %s", n.Name())
 
 	// Create the wallet.
 	initReq := &lnrpc.InitWalletRequest{
@@ -644,11 +652,11 @@ func (h *HarnessTest) RestoreNodeWithSeed(name string, extraArgs []string,
 		RecoveryWindow:     recoveryWindow,
 		ChannelBackups:     chanBackups,
 	}
-	_, err = h.manager.initWalletAndNode(node, initReq)
+	_, err = h.manager.initWalletAndNode(n, initReq)
 	require.NoErrorf(h, err, "failed to unlock and init node %s",
-		node.Name())
+		n.Name())
 
-	return node
+	return n
 }
 
 // NewNodeEtcd starts a new node with seed that'll use an external etcd
@@ -680,7 +688,7 @@ func (h *HarnessTest) NewNodeEtcd(name string, etcdCfg *etcd.Config,
 // database as its storage. The passed cluster flag indicates that we'd like
 // the node to join the cluster leader election.
 func (h *HarnessTest) NewNodeWithSeedEtcd(name string, etcdCfg *etcd.Config,
-	password []byte, entropy []byte, statelessInit, cluster bool,
+	password []byte, statelessInit, cluster bool,
 	leaderSessionTTL int) (*node.HarnessNode, []string, []byte) {
 
 	// We don't want to use the embedded etcd instance.
@@ -752,32 +760,43 @@ func (h *HarnessTest) SetFeeEstimateWithConf(
 
 // validateNodeState checks that the node doesn't have any uncleaned states
 // which will affect its following tests.
-func (h *HarnessTest) validateNodeState(hn *node.HarnessNode) {
-	errStr := func(subject string) string {
-		return fmt.Sprintf("%s: found %s channels, please close "+
+func (h *HarnessTest) validateNodeState(hn *node.HarnessNode) error {
+	errStr := func(subject string) error {
+		return fmt.Errorf("%s: found %s channels, please close "+
 			"them properly", hn.Name(), subject)
 	}
 	// If the node still has open channels, it's most likely that the
 	// current test didn't close it properly.
-	require.Zerof(h, hn.State.OpenChannel.Active, errStr("active"))
-	require.Zerof(h, hn.State.OpenChannel.Public, errStr("public"))
-	require.Zerof(h, hn.State.OpenChannel.Private, errStr("private"))
-	require.Zerof(h, hn.State.OpenChannel.Pending, errStr("pending open"))
+	if hn.State.OpenChannel.Active != 0 {
+		return errStr("active")
+	}
+	if hn.State.OpenChannel.Public != 0 {
+		return errStr("public")
+	}
+	if hn.State.OpenChannel.Private != 0 {
+		return errStr("private")
+	}
+	if hn.State.OpenChannel.Pending != 0 {
+		return errStr("pending open")
+	}
 
 	// The number of pending force close channels should be zero.
-	require.Zerof(h, hn.State.CloseChannel.PendingForceClose,
-		errStr("pending force"))
+	if hn.State.CloseChannel.PendingForceClose != 0 {
+		return errStr("pending force")
+	}
 
 	// The number of waiting close channels should be zero.
-	require.Zerof(h, hn.State.CloseChannel.WaitingClose,
-		errStr("waiting close"))
+	if hn.State.CloseChannel.WaitingClose != 0 {
+		return errStr("waiting close")
+	}
 
 	// Ths number of payments should be zero.
-	// TODO(yy): no need to check since it's deleted in the cleanup? Or
-	// check it in a wait?
-	require.Zerof(h, hn.State.Payment.Total, "%s: found "+
-		"uncleaned payments, please delete all of them properly",
-		hn.Name())
+	if hn.State.Payment.Total != 0 {
+		return fmt.Errorf("%s: found uncleaned payments, please "+
+			"delete all of them properly", hn.Name())
+	}
+
+	return nil
 }
 
 // GetChanPointFundingTxid takes a channel point and converts it into a chain
@@ -867,6 +886,23 @@ type OpenChannelParams struct {
 	// If set to false it avoids applying a fee rate of 0 and instead
 	// activates the default configured fee rate.
 	UseFeeRate bool
+
+	// FundMax is a boolean indicating whether the channel should be funded
+	// with the maximum possible amount from the wallet.
+	FundMax bool
+
+	// An optional note-to-self containing some useful information about the
+	// channel. This is stored locally only, and is purely for reference. It
+	// has no bearing on the channel's operation. Max allowed length is 500
+	// characters.
+	Memo string
+
+	// Outpoints is a list of client-selected outpoints that should be used
+	// for funding a channel. If Amt is specified then this amount is
+	// allocated from the sum of outpoints towards funding. If the
+	// FundMax flag is specified the entirety of selected funds is
+	// allocated towards channel funding.
+	Outpoints []*lnrpc.OutPoint
 }
 
 // prepareOpenChannel waits for both nodes to be synced to chain and returns an
@@ -907,6 +943,9 @@ func (h *HarnessTest) prepareOpenChannel(srcNode, destNode *node.HarnessNode,
 		FeeRate:            p.FeeRate,
 		UseBaseFee:         p.UseBaseFee,
 		UseFeeRate:         p.UseFeeRate,
+		FundMax:            p.FundMax,
+		Memo:               p.Memo,
+		Outpoints:          p.Outpoints,
 	}
 }
 
@@ -1101,25 +1140,39 @@ func (h *HarnessTest) CloseChannelAssertPending(hn *node.HarnessNode,
 		ChannelPoint: cp,
 		Force:        force,
 	}
-	stream := hn.RPC.CloseChannel(closeReq)
+
+	var (
+		stream rpc.CloseChanClient
+		event  *lnrpc.CloseStatusUpdate
+		err    error
+	)
 
 	// Consume the "channel close" update in order to wait for the closing
 	// transaction to be broadcast, then wait for the closing tx to be seen
 	// within the network.
-	event, err := h.ReceiveCloseChannelUpdate(stream)
-	if err != nil {
-		// TODO(yy): remove the sleep once the following bug is fixed.
-		// We may receive the error `cannot co-op close channel with
-		// active htlcs` or `link failed to shutdown` if we close the
-		// channel. We need to investigate the order of settling the
-		// payments and updating commitments to properly fix it.
-		time.Sleep(2 * time.Second)
-
-		// Give it another chance.
+	//
+	// TODO(yy): remove the wait once the following bug is fixed.
+	// - https://github.com/lightningnetwork/lnd/issues/6039
+	// We may receive the error `cannot co-op close channel with active
+	// htlcs` or `link failed to shutdown` if we close the channel. We need
+	// to investigate the order of settling the payments and updating
+	// commitments to properly fix it.
+	err = wait.NoError(func() error {
 		stream = hn.RPC.CloseChannel(closeReq)
 		event, err = h.ReceiveCloseChannelUpdate(stream)
-		require.NoError(h, err)
-	}
+		if err != nil {
+			h.Logf("Test: %s, close channel got error: %v",
+				h.manager.currentTestCase, err)
+
+			// NoError predicates every 200ms, which is too
+			// frequent for closing channels. We sleep here to
+			// avoid trying it too much.
+			time.Sleep(2 * time.Second)
+		}
+
+		return err
+	}, wait.ChannelCloseTimeout)
+	require.NoError(h, err, "retry closing channel failed")
 
 	pendingClose, ok := event.Update.(*lnrpc.CloseStatusUpdate_ClosePending)
 	require.Truef(h, ok, "expected channel close update, instead got %v",
@@ -1171,7 +1224,7 @@ func (h *HarnessTest) ForceCloseChannel(hn *node.HarnessNode,
 	closingTxid := h.AssertStreamChannelForceClosed(hn, cp, false, stream)
 
 	// Cleanup the force close.
-	h.CleanupForceClose(hn, cp)
+	h.CleanupForceClose(hn)
 
 	return closingTxid
 }
@@ -1428,9 +1481,7 @@ func (h *HarnessTest) OpenChannelPsbt(srcNode, destNode *node.HarnessNode,
 
 // CleanupForceClose mines a force close commitment found in the mempool and
 // the following sweep transaction from the force closing node.
-func (h *HarnessTest) CleanupForceClose(hn *node.HarnessNode,
-	chanPoint *lnrpc.ChannelPoint) {
-
+func (h *HarnessTest) CleanupForceClose(hn *node.HarnessNode) {
 	// Wait for the channel to be marked pending force close.
 	h.AssertNumPendingForceClose(hn, 1)
 
@@ -1586,6 +1637,51 @@ func (h *HarnessTest) MineBlocksAndAssertNumTxes(num uint32,
 	return blocks
 }
 
+// cleanMempool mines blocks till the mempool is empty and asserts all active
+// nodes have synced to the chain.
+func (h *HarnessTest) cleanMempool() {
+	_, startHeight := h.Miner.GetBestBlock()
+
+	// Mining the blocks slow to give `lnd` more time to sync.
+	var bestBlock *wire.MsgBlock
+	err := wait.NoError(func() error {
+		// If mempool is empty, exit.
+		mem := h.Miner.GetRawMempool()
+		if len(mem) == 0 {
+			_, height := h.Miner.GetBestBlock()
+			h.Logf("Mined %d blocks when cleanup the mempool",
+				height-startHeight)
+
+			return nil
+		}
+
+		// Otherwise mine a block.
+		blocks := h.Miner.MineBlocksSlow(1)
+		bestBlock = blocks[len(blocks)-1]
+
+		// Make sure all the active nodes are synced.
+		h.AssertActiveNodesSyncedTo(bestBlock)
+
+		return fmt.Errorf("still have %d txes in mempool", len(mem))
+	}, wait.MinerMempoolTimeout)
+	require.NoError(h, err, "timeout cleaning up mempool")
+}
+
+// CleanShutDown is used to quickly end a test by shutting down all non-standby
+// nodes and mining blocks to empty the mempool.
+//
+// NOTE: this method provides a faster exit for a test that involves force
+// closures as the caller doesn't need to mine all the blocks to make sure the
+// mempool is empty.
+func (h *HarnessTest) CleanShutDown() {
+	// First, shutdown all non-standby nodes to prevent new transactions
+	// being created and fed into the mempool.
+	h.shutdownNonStandbyNodes()
+
+	// Now mine blocks till the mempool is empty.
+	h.cleanMempool()
+}
+
 // MineEmptyBlocks mines a given number of empty blocks.
 //
 // NOTE: this differs from miner's `MineEmptyBlocks` as it requires the nodes
@@ -1686,10 +1782,12 @@ func (h *HarnessTest) OpenMultiChannelsAsync(
 		// Wait for the channel open event from the stream.
 		cp := h.WaitForChannelOpenEvent(req.stream)
 
-		// Check that both alice and bob have seen the channel
-		// from their channel watch request.
-		h.AssertTopologyChannelOpen(req.Local, cp)
-		h.AssertTopologyChannelOpen(req.Remote, cp)
+		if !req.Param.Private {
+			// Check that both alice and bob have seen the channel
+			// from their channel watch request.
+			h.AssertTopologyChannelOpen(req.Local, cp)
+			h.AssertTopologyChannelOpen(req.Remote, cp)
+		}
 
 		// Finally, check that the channel can be seen in their
 		// ListChannels.

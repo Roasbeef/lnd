@@ -141,6 +141,9 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		return nil, errResolverShuttingDown
 	}
 
+	log.Debugf("%T(%v): Resolving incoming HTLC(expiry=%v, height=%v)", h,
+		h.htlcResolution.ClaimOutpoint, h.htlcExpiry, currentHeight)
+
 	// We'll first check if this HTLC has been timed out, if so, we can
 	// return now and mark ourselves as resolved. If we're past the point of
 	// expiry of the HTLC, then at this point the sender can sweep it, so
@@ -509,7 +512,7 @@ func (h *htlcIncomingContestResolver) Supplement(htlc channeldb.HTLC) {
 func (h *htlcIncomingContestResolver) decodePayload() (*hop.Payload,
 	[]byte, error) {
 
-	onionReader := bytes.NewReader(h.htlc.OnionBlob)
+	onionReader := bytes.NewReader(h.htlc.OnionBlob[:])
 	iterator, err := h.OnionProcessor.ReconstructHopIterator(
 		onionReader, h.htlc.RHash[:],
 	)

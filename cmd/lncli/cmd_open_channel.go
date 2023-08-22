@@ -94,7 +94,12 @@ var openChannelCommand = cli.Command{
 
 	One can manually set the fee to be used for the funding transaction via
 	either the --conf_target or --sat_per_vbyte arguments. This is
-	optional.`,
+	optional.
+
+	One can also specify a short string memo to record some useful
+	information about the channel using the --memo argument. This is stored
+	locally only, and is purely for reference. It has no bearing on the
+	channel's operation. Max allowed length is 500 characters.`,
 	ArgsUsage: "node-key local-amt push-amt",
 	Flags: []cli.Flag{
 		cli.StringFlag{
@@ -110,6 +115,24 @@ var openChannelCommand = cli.Command{
 			Name: "local_amt",
 			Usage: "the number of satoshis the wallet should " +
 				"commit to the channel",
+		},
+		cli.BoolFlag{
+			Name: "fundmax",
+			Usage: "if set, the wallet will attempt to commit " +
+				"the maximum possible local amount to the " +
+				"channel. This must not be set at the same " +
+				"time as local_amt",
+		},
+		cli.StringSliceFlag{
+			Name: "utxo",
+			Usage: "a utxo specified as outpoint(tx:idx) which " +
+				"will be used to fund a channel. This flag " +
+				"can be repeatedly used to fund a channel " +
+				"with a selection of utxos. The selected " +
+				"funds can either be entirely spent by " +
+				"specifying the fundmax flag or partially by " +
+				"selecting a fraction of the sum of the " +
+				"outpoints in local_amt",
 		},
 		cli.Uint64Flag{
 			Name: "base_fee_msat",
@@ -252,6 +275,14 @@ var openChannelCommand = cli.Command{
 				"payment. If not specified, a default of 1% " +
 				"of the channel capacity will be used.",
 		},
+		cli.StringFlag{
+			Name: "memo",
+			Usage: `(optional) a note-to-self containing some useful
+				information about the channel. This is stored
+				locally only, and is purely for reference. It
+				has no bearing on the channel's operation. Max
+				allowed length is 500 characters`,
+		},
 	},
 	Action: actionDecorator(openChannel),
 }
@@ -294,6 +325,8 @@ func openChannel(ctx *cli.Context) error {
 		ZeroConf:                   ctx.Bool("zero_conf"),
 		ScidAlias:                  ctx.Bool("scid_alias"),
 		RemoteChanReserveSat:       ctx.Uint64("remote_reserve_sats"),
+		FundMax:                    ctx.Bool("fundmax"),
+		Memo:                       ctx.String("memo"),
 	}
 
 	switch {
@@ -352,8 +385,34 @@ func openChannel(ctx *cli.Context) error {
 			return fmt.Errorf("unable to decode local amt: %v", err)
 		}
 		args = args.Tail()
-	default:
-		return fmt.Errorf("local amt argument missing")
+	case !ctx.Bool("fundmax"):
+		return fmt.Errorf("either local_amt or fundmax must be " +
+			"specified")
+	}
+
+	// The fundmax flag is NOT allowed to be combined with local_amt above.
+	// It is allowed to be combined with push_amt, but only if explicitly
+	// set.
+	if ctx.Bool("fundmax") && req.LocalFundingAmount != 0 {
+		return fmt.Errorf("local amount cannot be set if attempting " +
+			"to commit the maximum amount out of the wallet")
+	}
+
+	// The fundmax flag is NOT allowed to be combined with the psbt flag.
+	if ctx.Bool("fundmax") && ctx.Bool("psbt") {
+		return fmt.Errorf("psbt cannot be set if attempting " +
+			"to commit the maximum amount out of the wallet")
+	}
+
+	if ctx.IsSet("utxo") {
+		utxos := ctx.StringSlice("utxo")
+
+		outpoints, err := utxosToOutpoints(utxos)
+		if err != nil {
+			return fmt.Errorf("unable to decode utxos: %w", err)
+		}
+
+		req.Outpoints = outpoints
 	}
 
 	if ctx.IsSet("push_amt") {
@@ -1075,4 +1134,22 @@ func decodePsbt(psbt string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("not a PSBT")
 	}
+}
+
+// parseUtxos parses a comma separated list of utxos into outpoints that are
+// passed to the server.
+func utxosToOutpoints(utxos []string) ([]*lnrpc.OutPoint, error) {
+	var outpoints []*lnrpc.OutPoint
+	if len(utxos) == 0 {
+		return nil, fmt.Errorf("no utxos specified")
+	}
+	for _, utxo := range utxos {
+		outpoint, err := NewProtoOutPoint(utxo)
+		if err != nil {
+			return nil, err
+		}
+		outpoints = append(outpoints, outpoint)
+	}
+
+	return outpoints, nil
 }

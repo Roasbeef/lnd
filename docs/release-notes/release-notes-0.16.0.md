@@ -459,6 +459,10 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   https://github.com/lightningnetwork/lnd/pull/6815)
 * [The a priori capacity factor is made configurable and its effect is 
   limited.](https://github.com/lightningnetwork/lnd/pull/7444)
+* Local edges and hop hints [are extended with a
+  capacity](https://github.com/lightningnetwork/lnd/pull/7520) to avoid channel
+  white listing in probability calculations. The influence of the node
+  probability is reduced.
 
 ## Configuration
 * Note that [this pathfinding change](https://github.com/lightningnetwork/lnd/pull/6815)
@@ -498,6 +502,10 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   [`tools`](https://github.com/lightningnetwork/lnd/pull/7254) and golangci
   issue where [it cannot fetch
   commits](https://github.com/lightningnetwork/lnd/pull/7374).
+  
+* [Update Postgres.md](https://github.com/lightningnetwork/lnd/pull/7442) 
+  to clarify how the database is currently used as a Key-Value store, but
+  in the future will have new schema introduced.
 
 ### Integration test
 
@@ -519,6 +527,7 @@ refactor the itest for code health and maintenance.
 
 # Contributors (Alphabetical Order)
 
+* Adam Anderson
 * Alejandro Pedraza
 * Alyssa Hertig
 * Andras Banki-Horvath

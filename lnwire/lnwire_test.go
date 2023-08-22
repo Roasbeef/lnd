@@ -628,8 +628,7 @@ func TestLightningWireProtocol(t *testing.T) {
 
 			v[0] = reflect.ValueOf(req)
 		},
-		MsgFundingLocked: func(v []reflect.Value, r *rand.Rand) {
-
+		MsgChannelReady: func(v []reflect.Value, r *rand.Rand) {
 			var c [32]byte
 			if _, err := r.Read(c[:]); err != nil {
 				t.Fatalf("unable to generate chan id: %v", err)
@@ -642,7 +641,7 @@ func TestLightningWireProtocol(t *testing.T) {
 				return
 			}
 
-			req := NewFundingLocked(ChannelID(c), pubKey)
+			req := NewChannelReady(ChannelID(c), pubKey)
 
 			if r.Int31()%2 == 0 {
 				scid := NewShortChanIDFromInt(uint64(r.Int63()))
@@ -1061,8 +1060,9 @@ func TestLightningWireProtocol(t *testing.T) {
 			//
 			// We'll allow the test to generate padding bytes up to
 			// the max message limit, factoring in the 2 bytes for
-			// the num pong bytes.
-			paddingBytes := make([]byte, r.Intn(MaxMsgBody-1))
+			// the num pong bytes and 2 bytes for encoding the
+			// length of the padding bytes.
+			paddingBytes := make([]byte, rand.Intn(MaxMsgBody-3))
 			req := Ping{
 				NumPongBytes: uint16(r.Intn(MaxPongBytes + 1)),
 				PaddingBytes: paddingBytes,
@@ -1136,8 +1136,8 @@ func TestLightningWireProtocol(t *testing.T) {
 			},
 		},
 		{
-			msgType: MsgFundingLocked,
-			scenario: func(m FundingLocked) bool {
+			msgType: MsgChannelReady,
+			scenario: func(m ChannelReady) bool {
 				return mainScenario(&m)
 			},
 		},

@@ -235,6 +235,20 @@ func (h *HarnessRPC) ImportAccount(
 	return resp
 }
 
+// ImportAccountAssertErr makes the ImportAccount RPC call and asserts an error
+// is returned. It then returns the error.
+func (h *HarnessRPC) ImportAccountAssertErr(
+	req *walletrpc.ImportAccountRequest) error {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	_, err := h.WalletKit.ImportAccount(ctxt, req)
+	require.Error(h, err)
+
+	return err
+}
+
 // ImportPublicKey makes a RPC call to the node's WalletKitClient and asserts.
 //
 //nolint:lll
@@ -263,6 +277,19 @@ func (h *HarnessRPC) SignPsbt(
 	return resp
 }
 
+// SignPsbtErr makes a RPC call to the node's WalletKitClient and asserts
+// an error returned.
+func (h *HarnessRPC) SignPsbtErr(req *walletrpc.SignPsbtRequest) error {
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	_, err := h.WalletKit.SignPsbt(ctxt, req)
+	require.Errorf(h, err, "%s: expect sign psbt to return an error",
+		h.Name)
+
+	return err
+}
+
 // ImportTapscript makes a RPC call to the node's WalletKitClient and asserts.
 //
 //nolint:lll
@@ -274,6 +301,21 @@ func (h *HarnessRPC) ImportTapscript(
 
 	resp, err := h.WalletKit.ImportTapscript(ctxt, req)
 	h.NoError(err, "ImportTapscript")
+
+	return resp
+}
+
+// RequiredReserve makes a RPC call to the node's WalletKitClient and asserts.
+//
+//nolint:lll
+func (h *HarnessRPC) RequiredReserve(
+	req *walletrpc.RequiredReserveRequest) *walletrpc.RequiredReserveResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.WalletKit.RequiredReserve(ctxt, req)
+	h.NoError(err, "RequiredReserve")
 
 	return resp
 }

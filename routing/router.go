@@ -4,6 +4,7 @@ import (
 	"bytes"
 	goErrors "errors"
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"sync"
@@ -80,6 +81,10 @@ const (
 	// bitcoin (160 for litecoin), though we now clamp the lower end of this
 	// range for user-chosen deltas to 18 blocks to be conservative.
 	MinCLTVDelta = 18
+
+	// MaxCLTVDelta is the maximum CLTV value accepted by LND for all
+	// timelock deltas.
+	MaxCLTVDelta = math.MaxUint16
 )
 
 var (
@@ -1493,7 +1498,7 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		}
 
 		if err := r.cfg.Graph.AddLightningNode(msg, op...); err != nil {
-			return errors.Errorf("unable to add node %v to the "+
+			return errors.Errorf("unable to add node %x to the "+
 				"graph: %v", msg.PubKeyBytes, err)
 		}
 
@@ -1746,7 +1751,7 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 			return err
 		}
 
-		log.Debugf("New channel update applied: %v",
+		log.Tracef("New channel update applied: %v",
 			newLogClosure(func() string { return spew.Sdump(msg) }))
 		r.stats.incNumChannelUpdates()
 
@@ -2096,7 +2101,7 @@ func (l *LightningPayment) Identifier() [32]byte {
 func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 	*route.Route, error) {
 
-	paySession, shardTracker, err := r.preparePayment(payment)
+	paySession, shardTracker, err := r.PreparePayment(payment)
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
@@ -2114,11 +2119,8 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 
 // SendPaymentAsync is the non-blocking version of SendPayment. The payment
 // result needs to be retrieved via the control tower.
-func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
-	paySession, shardTracker, err := r.preparePayment(payment)
-	if err != nil {
-		return err
-	}
+func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment,
+	ps PaymentSession, st shards.ShardTracker) error {
 
 	// Since this is the first time this payment is being made, we pass nil
 	// for the existing attempt.
@@ -2131,7 +2133,7 @@ func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
 
 		_, _, err := r.sendPayment(
 			payment.FeeLimit, payment.Identifier(),
-			payment.PayAttemptTimeout, paySession, shardTracker,
+			payment.PayAttemptTimeout, ps, st,
 		)
 		if err != nil {
 			log.Errorf("Payment %x failed: %v",
@@ -2163,9 +2165,9 @@ func spewPayment(payment *LightningPayment) logClosure {
 	})
 }
 
-// preparePayment creates the payment session and registers the payment with the
+// PreparePayment creates the payment session and registers the payment with the
 // control tower.
-func (r *ChannelRouter) preparePayment(payment *LightningPayment) (
+func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 	PaymentSession, shards.ShardTracker, error) {
 
 	// Before starting the HTLC routing attempt, we'll create a fresh
@@ -2798,6 +2800,19 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	// amount that this route can carry.
 	useMinAmt := amt == nil
 
+	var runningAmt lnwire.MilliSatoshi
+	if useMinAmt {
+		// For minimum amount routes, aim to deliver at least 1 msat to
+		// the destination. There are nodes in the wild that have a
+		// min_htlc channel policy of zero, which could lead to a zero
+		// amount payment being made.
+		runningAmt = 1
+	} else {
+		// If an amount is specified, we need to build a route that
+		// delivers exactly this amount to the final destination.
+		runningAmt = *amt
+	}
+
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
 	bandwidthHints, err := newBandwidthManager(
@@ -2814,24 +2829,46 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		return nil, err
 	}
 
+	sourceNode := r.selfNode.PubKeyBytes
+	unifiers, senderAmt, err := getRouteUnifiers(
+		sourceNode, hops, useMinAmt, runningAmt, outgoingChans,
+		r.cachedGraph, bandwidthHints,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	pathEdges, receiverAmt, err := getPathEdges(
+		sourceNode, senderAmt, unifiers, bandwidthHints, hops,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build and return the final route.
+	return newRoute(
+		sourceNode, pathEdges, uint32(height),
+		finalHopParams{
+			amt:         receiverAmt,
+			totalAmt:    receiverAmt,
+			cltvDelta:   uint16(finalCltvDelta),
+			records:     nil,
+			paymentAddr: payAddr,
+		},
+	)
+}
+
+// getRouteUnifiers returns a list of edge unifiers for the given route.
+func getRouteUnifiers(source route.Vertex, hops []route.Vertex,
+	useMinAmt bool, runningAmt lnwire.MilliSatoshi,
+	outgoingChans map[uint64]struct{}, graph routingGraph,
+	bandwidthHints *bandwidthManager) ([]*edgeUnifier, lnwire.MilliSatoshi,
+	error) {
+
 	// Allocate a list that will contain the edge unifiers for this route.
 	unifiers := make([]*edgeUnifier, len(hops))
 
-	var runningAmt lnwire.MilliSatoshi
-	if useMinAmt {
-		// For minimum amount routes, aim to deliver at least 1 msat to
-		// the destination. There are nodes in the wild that have a
-		// min_htlc channel policy of zero, which could lead to a zero
-		// amount payment being made.
-		runningAmt = 1
-	} else {
-		// If an amount is specified, we need to build a route that
-		// delivers exactly this amount to the final destination.
-		runningAmt = *amt
-	}
-
 	// Traverse hops backwards to accumulate fees in the running amounts.
-	source := r.selfNode.PubKeyBytes
 	for i := len(hops) - 1; i >= 0; i-- {
 		toNode := hops[i]
 
@@ -2848,16 +2885,16 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		// in the graph.
 		u := newNodeEdgeUnifier(source, toNode, outgoingChans)
 
-		err := u.addGraphPolicies(r.cachedGraph)
+		err := u.addGraphPolicies(graph)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		// Exit if there are no channels.
 		edgeUnifier, ok := u.edgeUnifiers[fromNode]
 		if !ok {
 			log.Errorf("Cannot find policy for node %v", fromNode)
-			return nil, ErrNoChannel{
+			return nil, 0, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
 			}
@@ -2877,7 +2914,7 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 			log.Errorf("Cannot find policy with amt=%v for node %v",
 				runningAmt, fromNode)
 
-			return nil, ErrNoChannel{
+			return nil, 0, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
 			}
@@ -2894,17 +2931,31 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		unifiers[i] = edgeUnifier
 	}
 
+	return unifiers, runningAmt, nil
+}
+
+// getPathEdges returns the edges that make up the path and the total amount,
+// including fees, to send the payment.
+func getPathEdges(source route.Vertex, receiverAmt lnwire.MilliSatoshi,
+	unifiers []*edgeUnifier, bandwidthHints *bandwidthManager,
+	hops []route.Vertex) ([]*channeldb.CachedEdgePolicy,
+	lnwire.MilliSatoshi, error) {
+
 	// Now that we arrived at the start of the route and found out the route
 	// total amount, we make a forward pass. Because the amount may have
 	// been increased in the backward pass, fees need to be recalculated and
 	// amount ranges re-checked.
 	var pathEdges []*channeldb.CachedEdgePolicy
-	receiverAmt := runningAmt
 	for i, unifier := range unifiers {
 		edge := unifier.getEdge(receiverAmt, bandwidthHints)
 		if edge == nil {
-			return nil, ErrNoChannel{
-				fromNode: hops[i-1],
+			fromNode := source
+			if i > 0 {
+				fromNode = hops[i-1]
+			}
+
+			return nil, 0, ErrNoChannel{
+				fromNode: fromNode,
 				position: i,
 			}
 		}
@@ -2919,15 +2970,5 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		pathEdges = append(pathEdges, edge.policy)
 	}
 
-	// Build and return the final route.
-	return newRoute(
-		source, pathEdges, uint32(height),
-		finalHopParams{
-			amt:         receiverAmt,
-			totalAmt:    receiverAmt,
-			cltvDelta:   uint16(finalCltvDelta),
-			records:     nil,
-			paymentAddr: payAddr,
-		},
-	)
+	return pathEdges, receiverAmt, nil
 }

@@ -71,6 +71,11 @@ type TxInfo struct {
 	Weight int64
 }
 
+// String returns a human readable version of the tx info.
+func (t *TxInfo) String() string {
+	return fmt.Sprintf("fee=%v, weight=%v", t.Fee, t.Weight)
+}
+
 // SignDetails is a struct containing information needed to resign certain
 // inputs. It is used to re-sign 2nd level HTLC transactions that uses the
 // SINGLE|ANYONECANPAY sighash type, as we have a signature provided by our

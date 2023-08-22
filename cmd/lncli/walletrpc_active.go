@@ -660,6 +660,13 @@ var fundPsbtCommand = cli.Command{
 				"always use the coin selection key scope to " +
 				"generate the change address",
 		},
+		cli.Uint64Flag{
+			Name: "min_confs",
+			Usage: "(optional) the minimum number of " +
+				"confirmations each input used for the PSBT " +
+				"transaction must satisfy",
+			Value: defaultUtxoMinConf,
+		},
 	},
 	Action: actionDecorator(fundPsbt),
 }
@@ -673,8 +680,11 @@ func fundPsbt(ctx *cli.Context) error {
 		return cli.ShowCommandHelp(ctx, "fund")
 	}
 
+	minConfs := int32(ctx.Uint64("min_confs"))
 	req := &walletrpc.FundPsbtRequest{
-		Account: ctx.String("account"),
+		Account:          ctx.String("account"),
+		MinConfs:         minConfs,
+		SpendUnconfirmed: minConfs == 0,
 	}
 
 	// Parse template flags.
@@ -1436,6 +1446,9 @@ var importAccountCommand = cli.Command{
 
 	The address type can usually be inferred from the key's version, but may
 	be required for certain keys to map them into the proper scope.
+
+	If an account with the same name already exists (even with a different
+	key scope), an error will be returned.
 
 	For BIP-0044 keys, an address type must be specified as we intend to not
 	support importing BIP-0044 keys into the wallet using the legacy

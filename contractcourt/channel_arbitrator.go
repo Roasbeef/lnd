@@ -554,7 +554,7 @@ func (c *ChannelArbitrator) Start(state *chanArbStartState) error {
 		// StateWaitingFullResolution after we've transitioned from
 		// StateContractClosed which can only be triggered by the local
 		// or remote close trigger. This trigger is only fired when we
-		// receive a chain event from the chain watcher than the
+		// receive a chain event from the chain watcher that the
 		// commitment has been confirmed on chain, and before we
 		// advance our state step, we call InsertConfirmedCommitSet.
 		err := c.relaunchResolvers(state.commitSet, triggerHeight)
@@ -1080,11 +1080,18 @@ func (c *ChannelArbitrator) stateStep(
 		label := labels.MakeLabel(
 			labels.LabelTypeChannelClose, &c.cfg.ShortChanID,
 		)
-
 		if err := c.cfg.PublishTx(closeTx, label); err != nil {
 			log.Errorf("ChannelArbitrator(%v): unable to broadcast "+
 				"close tx: %v", c.cfg.ChanPoint, err)
-			if err != lnwallet.ErrDoubleSpend {
+
+			// This makes sure we don't fail at startup if the
+			// commitment transaction has too low fees to make it
+			// into mempool. The rebroadcaster makes sure this
+			// transaction is republished regularly until confirmed
+			// or replaced.
+			if !errors.Is(err, lnwallet.ErrDoubleSpend) &&
+				!errors.Is(err, lnwallet.ErrMempoolFee) {
+
 				return StateError, closeTx, err
 			}
 		}
@@ -1173,10 +1180,10 @@ func (c *ChannelArbitrator) stateStep(
 			break
 		}
 
-		// Now that we know we'll need to act, we'll process the htlc
-		// actions, then create the structures we need to resolve all
+		// Now that we know we'll need to act, we'll process all the
+		// resolvers, then create the structures we need to resolve all
 		// outstanding contracts.
-		htlcResolvers, pktsToSend, err := c.prepContractResolutions(
+		resolvers, pktsToSend, err := c.prepContractResolutions(
 			contractResolutions, triggerHeight, trigger,
 			confCommitSet,
 		)
@@ -1186,15 +1193,15 @@ func (c *ChannelArbitrator) stateStep(
 			return StateError, closeTx, err
 		}
 
-		log.Debugf("ChannelArbitrator(%v): sending resolution message=%v",
-			c.cfg.ChanPoint,
-			newLogClosure(func() string {
-				return spew.Sdump(pktsToSend)
-			}))
-
 		// With the commitment broadcast, we'll then send over all
 		// messages we can send immediately.
 		if len(pktsToSend) != 0 {
+			log.Debugf("ChannelArbitrator(%v): sending "+
+				"resolution message=%v", c.cfg.ChanPoint,
+				newLogClosure(func() string {
+					return spew.Sdump(pktsToSend)
+				}))
+
 			err := c.cfg.DeliverResolutionMsg(pktsToSend...)
 			if err != nil {
 				log.Errorf("unable to send pkts: %v", err)
@@ -1203,16 +1210,16 @@ func (c *ChannelArbitrator) stateStep(
 		}
 
 		log.Debugf("ChannelArbitrator(%v): inserting %v contract "+
-			"resolvers", c.cfg.ChanPoint, len(htlcResolvers))
+			"resolvers", c.cfg.ChanPoint, len(resolvers))
 
-		err = c.log.InsertUnresolvedContracts(nil, htlcResolvers...)
+		err = c.log.InsertUnresolvedContracts(nil, resolvers...)
 		if err != nil {
 			return StateError, closeTx, err
 		}
 
 		// Finally, we'll launch all the required contract resolvers.
 		// Once they're all resolved, we're no longer needed.
-		c.launchResolvers(htlcResolvers)
+		c.launchResolvers(resolvers)
 
 		nextState = StateWaitingFullResolution
 
@@ -1222,22 +1229,27 @@ func (c *ChannelArbitrator) stateStep(
 		log.Infof("ChannelArbitrator(%v): still awaiting contract "+
 			"resolution", c.cfg.ChanPoint)
 
-		numUnresolved, err := c.log.FetchUnresolvedContracts()
+		unresolved, err := c.log.FetchUnresolvedContracts()
 		if err != nil {
 			return StateError, closeTx, err
 		}
 
-		// TODO(roasbeef): sweeps abandoned should also return anchor
-		// res
-
-		// If we still have unresolved contracts, then we'll stay alive
-		// to oversee their resolution.
-		if len(numUnresolved) != 0 {
-			nextState = StateWaitingFullResolution
+		// If we have no unresolved contracts, then we can move to the
+		// final state.
+		if len(unresolved) == 0 {
+			nextState = StateFullyResolved
 			break
 		}
 
-		nextState = StateFullyResolved
+		// Otherwise we still have unresolved contracts, then we'll
+		// stay alive to oversee their resolution.
+		nextState = StateWaitingFullResolution
+
+		// Add debug logs.
+		for _, r := range unresolved {
+			log.Debugf("ChannelArbitrator(%v): still have "+
+				"unresolved contract: %T", c.cfg.ChanPoint, r)
+		}
 
 	// If we start as fully resolved, then we'll end as fully resolved.
 	case StateFullyResolved:
@@ -1693,11 +1705,15 @@ func (c *ChannelArbitrator) checkCommitChainActions(height uint32,
 		)
 
 		if toChain {
+			// Convert to int64 in case of overflow.
+			remainingBlocks := int64(htlc.RefundTimeout) -
+				int64(height)
+
 			log.Infof("ChannelArbitrator(%v): go to chain for "+
 				"outgoing htlc %x: timeout=%v, "+
 				"blocks_until_expiry=%v, broadcast_delta=%v",
 				c.cfg.ChanPoint, htlc.RHash[:],
-				htlc.RefundTimeout, htlc.RefundTimeout-height,
+				htlc.RefundTimeout, remainingBlocks,
 				c.cfg.OutgoingBroadcastDelta,
 			)
 		}
@@ -1724,11 +1740,15 @@ func (c *ChannelArbitrator) checkCommitChainActions(height uint32,
 		)
 
 		if toChain {
+			// Convert to int64 in case of overflow.
+			remainingBlocks := int64(htlc.RefundTimeout) -
+				int64(height)
+
 			log.Infof("ChannelArbitrator(%v): go to chain for "+
 				"incoming htlc %x: timeout=%v, "+
 				"blocks_until_expiry=%v, broadcast_delta=%v",
 				c.cfg.ChanPoint, htlc.RHash[:],
-				htlc.RefundTimeout, htlc.RefundTimeout-height,
+				htlc.RefundTimeout, remainingBlocks,
 				c.cfg.IncomingBroadcastDelta,
 			)
 		}
@@ -1953,8 +1973,8 @@ func (c *ChannelArbitrator) checkRemoteDanglingActions(
 			continue
 		}
 
-		log.Infof("ChannelArbitrator(%v): immediately failing "+
-			"htlc=%x from remote commitment",
+		log.Infof("ChannelArbitrator(%v): fail dangling htlc=%x from "+
+			"local/remote commitments diff",
 			c.cfg.ChanPoint, htlc.RHash[:])
 
 		actionMap[HtlcFailNowAction] = append(
@@ -2037,8 +2057,8 @@ func (c *ChannelArbitrator) checkRemoteDiffActions(height uint32,
 			actionMap[HtlcFailNowAction], htlc,
 		)
 
-		log.Infof("ChannelArbitrator(%v): immediately failing "+
-			"htlc=%x from remote commitment",
+		log.Infof("ChannelArbitrator(%v): fail dangling htlc=%x from "+
+			"remote commitments diff",
 			c.cfg.ChanPoint, htlc.RHash[:])
 	}
 

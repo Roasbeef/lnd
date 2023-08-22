@@ -226,18 +226,6 @@ func runMultiHopHtlcLocalTimeout(ht *lntest.HarnessTest,
 	ht.AssertActiveHtlcs(bob, dustPayHash, payHash)
 	ht.AssertActiveHtlcs(carol, dustPayHash, payHash)
 
-	// blocksMined records how many blocks have mined after the creation of
-	// the invoice so it can be used to calculate how many more blocks need
-	// to be mined to trigger a force close later on.
-	var blocksMined uint32
-
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
-
 	// Increase the fee estimate so that the following force close tx will
 	// be cpfp'ed.
 	ht.SetFeeEstimate(30000)
@@ -249,7 +237,7 @@ func runMultiHopHtlcLocalTimeout(ht *lntest.HarnessTest,
 	numBlocks := padCLTV(
 		uint32(finalCltvDelta - lncfg.DefaultOutgoingBroadcastDelta),
 	)
-	ht.MineBlocks(numBlocks - blocksMined)
+	ht.MineBlocks(numBlocks)
 
 	// Bob's force close transaction should now be found in the mempool. If
 	// there are anchors, we also expect Bob's anchor sweep.
@@ -410,18 +398,6 @@ func runMultiHopReceiverChainClaim(ht *lntest.HarnessTest,
 	ht.AssertActiveHtlcs(bob, payHash[:])
 	ht.AssertActiveHtlcs(carol, payHash[:])
 
-	// blocksMined records how many blocks have mined after the creation of
-	// the invoice so it can be used to calculate how many more blocks need
-	// to be mined to trigger a force close later on.
-	var blocksMined uint32
-
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
-
 	// Wait for carol to mark invoice as accepted. There is a small gap to
 	// bridge between adding the htlc to the channel and executing the exit
 	// hop logic.
@@ -449,7 +425,7 @@ func runMultiHopReceiverChainClaim(ht *lntest.HarnessTest,
 
 	// Now we'll mine enough blocks to prompt carol to actually go to the
 	// chain in order to sweep her HTLC since the value is high enough.
-	ht.MineBlocks(numBlocks - blocksMined)
+	ht.MineBlocks(numBlocks)
 
 	// At this point, Carol should broadcast her active commitment
 	// transaction in order to go to the chain and sweep her HTLC. If there
@@ -630,13 +606,6 @@ func runMultiHopLocalForceCloseOnChainHtlcTimeout(ht *lntest.HarnessTest,
 	// to be mined to trigger a force close later on.
 	var blocksMined uint32
 
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
-
 	// Increase the fee estimate so that the following force close tx will
 	// be cpfp'ed.
 	ht.SetFeeEstimate(30000)
@@ -808,13 +777,6 @@ func runMultiHopRemoteForceCloseOnChainHtlcTimeout(ht *lntest.HarnessTest,
 	// the invoice so it can be used to calculate how many more blocks need
 	// to be mined to trigger a force close later on.
 	var blocksMined uint32
-
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
 
 	// Once the HTLC has cleared, all the nodes in our mini network should
 	// show that the HTLC has been locked in.
@@ -999,13 +961,6 @@ func runMultiHopHtlcLocalChainClaim(ht *lntest.HarnessTest,
 	// the invoice so it can be used to calculate how many more blocks need
 	// to be mined to trigger a force close later on.
 	var blocksMined uint32
-
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
 
 	// Increase the fee estimate so that the following force close tx will
 	// be cpfp'ed.
@@ -1319,13 +1274,6 @@ func runMultiHopHtlcRemoteChainClaim(ht *lntest.HarnessTest,
 	// to be mined to trigger a force close later on.
 	var blocksMined uint32
 
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && routeHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
-
 	// Increase the fee estimate so that the following force close tx will
 	// be cpfp'ed.
 	ht.SetFeeEstimate(30000)
@@ -1583,6 +1531,9 @@ func runMultiHopHtlcAggregation(ht *lntest.HarnessTest,
 	resp := carol.RPC.AddInvoice(invoice)
 	ht.CompletePaymentRequests(alice, []string{resp.PaymentRequest})
 
+	// Make sure Carol has settled the invoice.
+	ht.AssertInvoiceSettled(carol, resp.PaymentAddr)
+
 	// With the network active, we'll now add a new hodl invoices at both
 	// Alice's and Carol's end. Make sure the cltv expiry delta is large
 	// enough, otherwise Bob won't send out the outgoing htlc.
@@ -1687,13 +1638,6 @@ func runMultiHopHtlcAggregation(ht *lntest.HarnessTest,
 	// the invoice so it can be used to calculate how many more blocks need
 	// to be mined to trigger a force close later on.
 	var blocksMined uint32
-
-	// If this is a private channel, and it was zero conf, then we'll need
-	// to mine one block to confirm the channels created above.
-	if zeroConf && carolRouteHints != nil {
-		ht.MineBlocksAndAssertNumTxes(1, 2)
-		blocksMined++
-	}
 
 	// Increase the fee estimate so that the following force close tx will
 	// be cpfp'ed.
@@ -2007,22 +1951,12 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 		)
 	}
 
-	var (
-		cancel       context.CancelFunc
-		acceptStream rpc.AcceptorClient
-	)
-	// If a zero-conf channel is being opened, the nodes are signalling the
-	// zero-conf feature bit. Setup a ChannelAcceptor for the fundee.
-	if zeroConf {
-		acceptStream, cancel = bob.RPC.ChannelAcceptor()
-		go acceptChannel(ht.T, true, acceptStream)
-	}
-
 	var privateChan bool
 	if c == lnrpc.CommitmentType_SIMPLE_TAPROOT {
 		privateChan = true
 	}
 
+	// Prepare params for Alice.
 	aliceParams := lntest.OpenChannelParams{
 		Private:        privateChan,
 		Amt:            chanAmt,
@@ -2037,14 +1971,7 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 		aliceParams.CommitmentType = lnrpc.CommitmentType_SIMPLE_TAPROOT
 	}
 
-	aliceChanPoint := ht.OpenChannel(alice, bob, aliceParams)
-
-	// Remove the ChannelAcceptor for Bob.
-	if zeroConf {
-		cancel()
-	}
-
-	// We'll then create a channel from Bob to Carol. After this channel is
+	// We'll create a channel from Bob to Carol. After this channel is
 	// open, our topology looks like:  A -> B -> C.
 	var bobFundingShim *lnrpc.FundingShim
 	if c == lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE {
@@ -2053,13 +1980,7 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 		)
 	}
 
-	// Setup a ChannelAcceptor for Carol if a zero-conf channel open is
-	// being attempted.
-	if zeroConf {
-		acceptStream, cancel = carol.RPC.ChannelAcceptor()
-		go acceptChannel(ht.T, true, acceptStream)
-	}
-
+	// Prepare params for Bob.
 	bobParams := lntest.OpenChannelParams{
 		Amt:            chanAmt,
 		Private:        privateChan,
@@ -2074,11 +1995,37 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 		bobParams.CommitmentType = lnrpc.CommitmentType_SIMPLE_TAPROOT
 	}
 
-	bobChanPoint := ht.OpenChannel(bob, carol, bobParams)
+	var (
+		acceptStreamBob   rpc.AcceptorClient
+		acceptStreamCarol rpc.AcceptorClient
+		cancelBob         context.CancelFunc
+		cancelCarol       context.CancelFunc
+	)
 
-	// Remove the ChannelAcceptor for Carol.
+	// If a zero-conf channel is being opened, the nodes are signalling the
+	// zero-conf feature bit. Setup a ChannelAcceptor for the fundee.
 	if zeroConf {
-		cancel()
+		acceptStreamBob, cancelBob = bob.RPC.ChannelAcceptor()
+		go acceptChannel(ht.T, true, acceptStreamBob)
+
+		acceptStreamCarol, cancelCarol = carol.RPC.ChannelAcceptor()
+		go acceptChannel(ht.T, true, acceptStreamCarol)
+	}
+
+	// Open channels in batch to save blocks mined.
+	reqs := []*lntest.OpenChannelRequest{
+		{Local: alice, Remote: bob, Param: aliceParams},
+		{Local: bob, Remote: carol, Param: bobParams},
+	}
+	resp := ht.OpenMultiChannelsAsync(reqs)
+
+	aliceChanPoint := resp[0]
+	bobChanPoint := resp[1]
+
+	// Remove the ChannelAcceptor for Bob and Carol.
+	if zeroConf {
+		cancelBob()
+		cancelCarol()
 	}
 
 	// Make sure alice and carol know each other's channels.
@@ -2096,4 +2043,321 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 	}
 
 	return aliceChanPoint, bobChanPoint, carol
+}
+
+// testHtlcTimeoutResolverExtractPreimageRemote tests that in the multi-hop
+// setting, Alice->Bob->Carol, when Bob's outgoing HTLC is swept by Carol using
+// the 2nd level success tx2nd level success tx, Bob's timeout resolver will
+// extract the preimage from the sweep tx found in mempool or blocks(for
+// neutrino). The 2nd level success tx is broadcast by Carol and spends the
+// outpoint on her commit tx.
+func testHtlcTimeoutResolverExtractPreimageRemote(ht *lntest.HarnessTest) {
+	runMultiHopHtlcClaimTest(ht, runExtraPreimageFromRemoteCommit)
+}
+
+// runExtraPreimageFromRemoteCommit checks that Bob's htlc timeout resolver
+// will extract the preimage from the 2nd level success tx broadcast by Carol
+// which spends the htlc output on her commitment tx.
+func runExtraPreimageFromRemoteCommit(ht *lntest.HarnessTest,
+	alice, bob *node.HarnessNode, c lnrpc.CommitmentType, zeroConf bool) {
+
+	// First, we'll create a three hop network: Alice -> Bob -> Carol, with
+	// Carol refusing to actually settle or directly cancel any HTLC's
+	// self.
+	aliceChanPoint, bobChanPoint, carol := createThreeHopNetwork(
+		ht, alice, bob, false, c, zeroConf,
+	)
+
+	// With the network active, we'll now add a new hodl invoice at Carol's
+	// end. Make sure the cltv expiry delta is large enough, otherwise Bob
+	// won't send out the outgoing htlc.
+	preimage := ht.RandomPreimage()
+	payHash := preimage.Hash()
+	invoiceReq := &invoicesrpc.AddHoldInvoiceRequest{
+		Value:      100_000,
+		CltvExpiry: finalCltvDelta,
+		Hash:       payHash[:],
+	}
+	eveInvoice := carol.RPC.AddHoldInvoice(invoiceReq)
+
+	// Subscribe the invoice.
+	stream := carol.RPC.SubscribeSingleInvoice(payHash[:])
+
+	// Now that we've created the invoice, we'll send a single payment from
+	// Alice to Carol. We won't wait for the response however, as Carol
+	// will not immediately settle the payment.
+	req := &routerrpc.SendPaymentRequest{
+		PaymentRequest: eveInvoice.PaymentRequest,
+		TimeoutSeconds: 60,
+		FeeLimitMsat:   noFeeLimitMsat,
+	}
+	alice.RPC.SendPayment(req)
+
+	// Once the payment sent, Alice should have one outgoing HTLC active.
+	ht.AssertOutgoingHTLCActive(alice, aliceChanPoint, payHash[:])
+
+	// Bob should have two HTLCs active. One incoming HTLC from Alice, and
+	// one outgoing to Carol.
+	ht.AssertIncomingHTLCActive(bob, aliceChanPoint, payHash[:])
+	htlc := ht.AssertOutgoingHTLCActive(bob, bobChanPoint, payHash[:])
+
+	// Carol should have one incoming HTLC from Bob.
+	ht.AssertIncomingHTLCActive(carol, bobChanPoint, payHash[:])
+
+	// Wait for Carol to mark invoice as accepted. There is a small gap to
+	// bridge between adding the htlc to the channel and executing the exit
+	// hop logic.
+	ht.AssertInvoiceState(stream, lnrpc.Invoice_ACCEPTED)
+
+	// Bob now goes offline so the link between Bob and Carol is broken.
+	restartBob := ht.SuspendNode(bob)
+
+	// Carol now settles the invoice, since her link with Bob is broken,
+	// Bob won't know the preimage.
+	carol.RPC.SettleInvoice(preimage[:])
+
+	// We'll now mine enough blocks to trigger Carol's broadcast of her
+	// commitment transaction due to the fact that the HTLC is about to
+	// timeout. With the default incoming broadcast delta of 10, this
+	// will be the htlc expiry height minus 10.
+	numBlocks := padCLTV(uint32(
+		invoiceReq.CltvExpiry - lncfg.DefaultIncomingBroadcastDelta,
+	))
+	ht.MineBlocks(numBlocks)
+
+	// Carol's force close transaction should now be found in the mempool.
+	// If there are anchors, we also expect Carol's anchor sweep. We now
+	// mine a block to confirm Carol's closing transaction.
+	ht.MineClosingTx(bobChanPoint, c)
+
+	// With the closing transaction confirmed, we should expect Carol's
+	// HTLC success transaction to be broadcast.
+	ht.Miner.AssertNumTxsInMempool(1)
+
+	// Restart Bob. Once he finishes syncing the channel state, he should
+	// notice the force close from Carol.
+	require.NoError(ht, restartBob())
+
+	// Get the current height to compute number of blocks to mine to
+	// trigger the htlc timeout resolver from Bob.
+	_, height := ht.Miner.GetBestBlock()
+
+	// We'll now mine enough blocks to trigger Bob's timeout resolver.
+	numBlocks = htlc.ExpirationHeight - uint32(height) -
+		lncfg.DefaultOutgoingBroadcastDelta
+
+	// We should now have Carol's htlc suucess tx in the mempool.
+	numTxesMempool := 1
+
+	// For neutrino backend, the timeout resolver needs to extract the
+	// preimage from the blocks.
+	if ht.IsNeutrinoBackend() {
+		// Mine a block to confirm Carol's 2nd level success tx.
+		ht.MineBlocksAndAssertNumTxes(1, 1)
+		numTxesMempool--
+	}
+	// Mine empty blocks so Carol's htlc success tx stays in mempool. Once
+	// the height is reached, Bob's timeout resolver will resolve the htlc
+	// by extracing the preimage from the mempool.
+	ht.MineEmptyBlocks(int(numBlocks))
+
+	// Finally, check that the Alice's payment is marked as succeeded as
+	// Bob has settled the htlc using the preimage extracted from Carol's
+	// 2nd level success tx.
+	ht.AssertPaymentStatus(alice, preimage, lnrpc.Payment_SUCCEEDED)
+
+	switch c {
+	// For non-anchor channel type, we should expect to see Bob's commit
+	// sweep in the mempool.
+	case lnrpc.CommitmentType_LEGACY:
+		numTxesMempool++
+
+	// For non-anchor channel type, we should expect to see Bob's commit
+	// sweep and his anchor sweep tx in the mempool.
+	case lnrpc.CommitmentType_ANCHORS:
+		numTxesMempool += 2
+
+	// For script-enforced leased channel, we should expect to see Bob's
+	// anchor sweep tx in the mempool.
+	case lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE:
+		numTxesMempool++
+
+		// For neutrino backend, because of the additional block mined,
+		// Bob's output is now mature.
+		if ht.IsNeutrinoBackend() {
+			numTxesMempool++
+		}
+	}
+
+	// Mine a block to clean the mempool.
+	ht.MineBlocksAndAssertNumTxes(1, numTxesMempool)
+
+	// NOTE: for non-standby nodes there's no need to clean up the force
+	// close as long as the mempool is cleaned.
+	ht.CleanShutDown()
+}
+
+// testHtlcTimeoutResolverExtractPreimage tests that in the multi-hop setting,
+// Alice->Bob->Carol, when Bob's outgoing HTLC is swept by Carol using the
+// direct preimage spend, Bob's timeout resolver will extract the preimage from
+// the sweep tx found in mempool or blocks(for neutrino). The direct spend tx
+// is broadcast by Carol and spends the outpoint on Bob's commit tx.
+func testHtlcTimeoutResolverExtractPreimageLocal(ht *lntest.HarnessTest) {
+	runMultiHopHtlcClaimTest(ht, runExtraPreimageFromLocalCommit)
+}
+
+// runExtraPreimageFromLocalCommit checks that Bob's htlc timeout resolver will
+// extract the preimage from the direct spend broadcast by Carol which spends
+// the htlc output on Bob's commitment tx.
+func runExtraPreimageFromLocalCommit(ht *lntest.HarnessTest,
+	alice, bob *node.HarnessNode, c lnrpc.CommitmentType, zeroConf bool) {
+
+	// First, we'll create a three hop network: Alice -> Bob -> Carol, with
+	// Carol refusing to actually settle or directly cancel any HTLC's
+	// self.
+	aliceChanPoint, bobChanPoint, carol := createThreeHopNetwork(
+		ht, alice, bob, false, c, zeroConf,
+	)
+
+	// With the network active, we'll now add a new hodl invoice at Carol's
+	// end. Make sure the cltv expiry delta is large enough, otherwise Bob
+	// won't send out the outgoing htlc.
+	preimage := ht.RandomPreimage()
+	payHash := preimage.Hash()
+	invoiceReq := &invoicesrpc.AddHoldInvoiceRequest{
+		Value:      100_000,
+		CltvExpiry: finalCltvDelta,
+		Hash:       payHash[:],
+	}
+	eveInvoice := carol.RPC.AddHoldInvoice(invoiceReq)
+
+	// Subscribe the invoice.
+	stream := carol.RPC.SubscribeSingleInvoice(payHash[:])
+
+	// Now that we've created the invoice, we'll send a single payment from
+	// Alice to Carol. We won't wait for the response however, as Carol
+	// will not immediately settle the payment.
+	req := &routerrpc.SendPaymentRequest{
+		PaymentRequest: eveInvoice.PaymentRequest,
+		TimeoutSeconds: 60,
+		FeeLimitMsat:   noFeeLimitMsat,
+	}
+	alice.RPC.SendPayment(req)
+
+	// Once the payment sent, Alice should have one outgoing HTLC active.
+	ht.AssertOutgoingHTLCActive(alice, aliceChanPoint, payHash[:])
+
+	// Bob should have two HTLCs active. One incoming HTLC from Alice, and
+	// one outgoing to Carol.
+	ht.AssertIncomingHTLCActive(bob, aliceChanPoint, payHash[:])
+	htlc := ht.AssertOutgoingHTLCActive(bob, bobChanPoint, payHash[:])
+
+	// Carol should have one incoming HTLC from Bob.
+	ht.AssertIncomingHTLCActive(carol, bobChanPoint, payHash[:])
+
+	// Wait for Carol to mark invoice as accepted. There is a small gap to
+	// bridge between adding the htlc to the channel and executing the exit
+	// hop logic.
+	ht.AssertInvoiceState(stream, lnrpc.Invoice_ACCEPTED)
+
+	// Bob now goes offline so the link between Bob and Carol is broken.
+	restartBob := ht.SuspendNode(bob)
+
+	// Carol now settles the invoice, since her link with Bob is broken,
+	// Bob won't know the preimage.
+	carol.RPC.SettleInvoice(preimage[:])
+
+	// Stop Carol so it's easier to check the mempool's state since she
+	// will broadcast the anchor sweeping once Bob force closes.
+	restartCarol := ht.SuspendNode(carol)
+
+	// Restart Bob to force close the channel.
+	require.NoError(ht, restartBob())
+
+	// Bob force closes the channel, which gets his commitment tx into the
+	// mempool.
+	ht.CloseChannelAssertPending(bob, bobChanPoint, true)
+
+	// Mine Bob's force close tx.
+	closeTx := ht.MineClosingTx(bobChanPoint, c)
+
+	// We'll now mine enough blocks to trigger Carol's sweeping of the htlc
+	// via the direct spend. With the default incoming broadcast delta of
+	// 10, this will be the htlc expiry height minus 10.
+	//
+	// NOTE: we need to mine 1 fewer block as we've already mined one to
+	// confirm Bob's force close tx.
+	numBlocks := padCLTV(uint32(
+		invoiceReq.CltvExpiry - lncfg.DefaultIncomingBroadcastDelta - 1,
+	))
+
+	// Mine empty blocks so it's easier to check Bob's sweeping txes below.
+	ht.MineEmptyBlocks(int(numBlocks))
+
+	// Increase the fee rate used by the sweeper so Carol's direct spend tx
+	// won't be replaced by Bob's timeout tx.
+	ht.SetFeeEstimate(30000)
+
+	// Restart Carol to sweep the htlc output.
+	require.NoError(ht, restartCarol())
+
+	// Construct the htlc output on Bob's commitment tx, and decide its
+	// index based on the commit type below.
+	htlcOutpoint := wire.OutPoint{Hash: closeTx.TxHash()}
+
+	// Check the current mempool state and we should see,
+	// - Carol's direct spend tx.
+	// - Bob's local output sweep tx, if this is NOT script enforced lease.
+	// - Carol's anchor sweep tx, if the commitment type is anchor.
+	switch c {
+	case lnrpc.CommitmentType_LEGACY:
+		htlcOutpoint.Index = 0
+		ht.Miner.AssertNumTxsInMempool(2)
+
+	case lnrpc.CommitmentType_ANCHORS:
+		htlcOutpoint.Index = 2
+		ht.Miner.AssertNumTxsInMempool(3)
+
+	case lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE:
+		htlcOutpoint.Index = 2
+		ht.Miner.AssertNumTxsInMempool(2)
+	}
+
+	// Get the current height to compute number of blocks to mine to
+	// trigger the timeout resolver from Bob.
+	_, height := ht.Miner.GetBestBlock()
+
+	// We'll now mine enough blocks to trigger Bob's htlc timeout resolver
+	// to act. Once his timeout resolver starts, it will extract the
+	// preimage from Carol's direct spend tx found in the mempool.
+	numBlocks = htlc.ExpirationHeight - uint32(height) -
+		lncfg.DefaultOutgoingBroadcastDelta
+
+	// Decrease the fee rate used by the sweeper so Bob's timeout tx will
+	// not replace Carol's direct spend tx.
+	ht.SetFeeEstimate(1000)
+
+	// Mine empty blocks so Carol's direct spend tx stays in mempool. Once
+	// the height is reached, Bob's timeout resolver will resolve the htlc
+	// by extracing the preimage from the mempool.
+	ht.MineEmptyBlocks(int(numBlocks))
+
+	// For neutrino backend, the timeout resolver needs to extract the
+	// preimage from the blocks.
+	if ht.IsNeutrinoBackend() {
+		// Make sure the direct spend tx is still in the mempool.
+		ht.Miner.AssertOutpointInMempool(htlcOutpoint)
+
+		// Mine a block to confirm Carol's direct spend tx.
+		ht.MineBlocks(1)
+	}
+
+	// Finally, check that the Alice's payment is marked as succeeded as
+	// Bob has settled the htlc using the preimage extracted from Carol's
+	// direct spend tx.
+	ht.AssertPaymentStatus(alice, preimage, lnrpc.Payment_SUCCEEDED)
+
+	// NOTE: for non-standby nodes there's no need to clean up the force
+	// close as long as the mempool is cleaned.
+	ht.CleanShutDown()
 }

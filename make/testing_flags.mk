@@ -100,12 +100,16 @@ ifeq ($(UNIT_TARGETED), yes)
 UNIT := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
 UNIT_DEBUG := $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
 UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS) lowscrypt" $(TEST_FLAGS) -race $(UNITPKG)
+# NONE is a special value which selects no other tests but only executes the benchmark tests here.
+UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
 UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
 UNIT_RACE := $(UNIT) -race
+# NONE is a special value which selects no other tests but only executes the benchmark tests here.
+UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE
 endif
 
 
@@ -116,3 +120,6 @@ endif
 
 # Construct the integration test command with the added build flags.
 ITEST_TAGS := $(DEV_TAGS) $(RPC_TAGS) integration $(backend)
+
+# Construct the coverage test command with the added build flags.
+GOACC := $(GOACC_BIN) $(COVER_PKG) -- -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)

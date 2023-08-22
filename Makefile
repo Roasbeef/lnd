@@ -10,7 +10,7 @@ GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 GO_BIN := ${GOPATH}/bin
 BTCD_BIN := $(GO_BIN)/btcd
 GOIMPORTS_BIN := $(GO_BIN)/gosimports
-GOMOBILE_BIN := GO111MODULE=off $(GO_BIN)/gomobile
+GOMOBILE_BIN := $(GO_BIN)/gomobile
 GOACC_BIN := $(GO_BIN)/go-acc
 
 MOBILE_BUILD_DIR :=${GOPATH}/src/$(MOBILE_PKG)/build
@@ -55,7 +55,7 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
-DOCKER_TOOLS = docker run -v $$(pwd):/build lnd-tools
+DOCKER_TOOLS = docker run --rm -v $$(pwd):/build lnd-tools
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -190,11 +190,15 @@ unit-debug: $(BTCD_BIN)
 
 unit-cover: $(GOACC_BIN)
 	@$(call print, "Running unit coverage tests.")
-	$(GOACC_BIN) $(COVER_PKG) -- -tags="$(DEV_TAGS) $(LOG_TAGS)"
+	$(GOACC)
 
 unit-race:
 	@$(call print, "Running unit race tests.")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(UNIT_RACE)
+
+unit-bench: $(BTCD_BIN)
+	@$(call print, "Running benchmark tests.")
+	$(UNIT_BENCH)
 
 # =============
 # FLAKE HUNTING
@@ -245,6 +249,14 @@ list:
 		grep -v Makefile | \
 		sort
 
+sqlc:
+	@$(call print, "Generating sql models and queries in Go")
+	./scripts/gen_sqlc_docker.sh
+
+sqlc-check: sqlc
+	@$(call print, "Verifying sql code generation.")
+	if test -n "$$(git status --porcelain '*.go')"; then echo "SQL models not properly generated!"; git status --porcelain '*.go'; exit 1; fi
+
 rpc:
 	@$(call print, "Compiling protos.")
 	cd ./lnrpc; ./gen_protos_docker.sh
@@ -263,8 +275,8 @@ rpc-js-compile:
 	GOOS=js GOARCH=wasm $(GOBUILD) -tags="$(WASM_RELEASE_TAGS)" $(PKG)/lnrpc/...
 
 sample-conf-check:
-	@$(call print, "Making sure every flag has an example in the sample-lnd.conf file")
-	for flag in $$(GO_FLAGS_COMPLETION=1 go run -tags="$(RELEASE_TAGS)" $(PKG)/cmd/lnd -- | grep -v help | cut -c3-); do if ! grep -q $$flag sample-lnd.conf; then echo "Command line flag --$$flag not added to sample-lnd.conf"; exit 1; fi; done
+	@$(call print, "Checking that default values in the sample-lnd.conf file are set correctly")
+	scripts/check-sample-lnd-conf.sh "$(RELEASE_TAGS)"
 
 mobile-rpc:
 	@$(call print, "Creating mobile RPC from protos.")
@@ -274,25 +286,25 @@ vendor:
 	@$(call print, "Re-creating vendor directory.")
 	rm -r vendor/; go mod vendor
 
-apple: vendor mobile-rpc
+apple: mobile-rpc
 	@$(call print, "Building iOS and macOS cxframework ($(IOS_BUILD)).")
 	mkdir -p $(IOS_BUILD_DIR)
-	$(GOMOBILE_BIN) bind -target=ios,iossimulator,macos -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" $(RELEASE_LDFLAGS) -v -o $(IOS_BUILD) $(MOBILE_PKG)
+	$(GOMOBILE_BIN) bind -target=ios,iossimulator,macos -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(IOS_BUILD) $(MOBILE_PKG)
 
-ios: vendor mobile-rpc
+ios: mobile-rpc
 	@$(call print, "Building iOS cxframework ($(IOS_BUILD)).")
 	mkdir -p $(IOS_BUILD_DIR)
-	$(GOMOBILE_BIN) bind -target=ios,iossimulator -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" $(RELEASE_LDFLAGS) -v -o $(IOS_BUILD) $(MOBILE_PKG)
+	$(GOMOBILE_BIN) bind -target=ios,iossimulator -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(IOS_BUILD) $(MOBILE_PKG)
 
-macos: vendor mobile-rpc
+macos: mobile-rpc
 	@$(call print, "Building macOS cxframework ($(IOS_BUILD)).")
 	mkdir -p $(IOS_BUILD_DIR)
-	$(GOMOBILE_BIN) bind -target=macos -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" $(RELEASE_LDFLAGS) -v -o $(IOS_BUILD) $(MOBILE_PKG)
+	$(GOMOBILE_BIN) bind -target=macos -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(IOS_BUILD) $(MOBILE_PKG)
 
-android: vendor mobile-rpc
+android: mobile-rpc
 	@$(call print, "Building Android library ($(ANDROID_BUILD)).")
 	mkdir -p $(ANDROID_BUILD_DIR)
-	$(GOMOBILE_BIN) bind -target=android -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" $(RELEASE_LDFLAGS) -v -o $(ANDROID_BUILD) $(MOBILE_PKG)
+	$(GOMOBILE_BIN) bind -target=android -androidapi 21 -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(ANDROID_BUILD) $(MOBILE_PKG)
 
 mobile: ios android
 

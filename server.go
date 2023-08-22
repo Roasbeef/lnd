@@ -530,6 +530,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		readBufferPool, cfg.Workers.Read, pool.DefaultWorkerTimeout,
 	)
 
+	//nolint:lll
 	featureMgr, err := feature.NewManager(feature.Config{
 		NoTLVOnion:               cfg.ProtocolOptions.LegacyOnion(),
 		NoStaticRemoteKey:        cfg.ProtocolOptions.NoStaticRemoteKey(),
@@ -541,6 +542,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		NoZeroConf:               !cfg.ProtocolOptions.ZeroConf(),
 		NoAnySegwit:              cfg.ProtocolOptions.NoAnySegwit(),
 		NoTaprootChans:           !cfg.ProtocolOptions.TaprootChans,
+		CustomFeatures:           cfg.ProtocolOptions.ExperimentalProtocol.CustomFeatures(),
 	})
 	if err != nil {
 		return nil, err
@@ -994,15 +996,18 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	}
 
 	s.authGossiper = discovery.New(discovery.Config{
-		Router:            s.chanRouter,
-		Notifier:          s.cc.ChainNotifier,
-		ChainHash:         *s.cfg.ActiveNetParams.GenesisHash,
-		Broadcast:         s.BroadcastMessage,
-		ChanSeries:        chanSeries,
-		NotifyWhenOnline:  s.NotifyWhenOnline,
-		NotifyWhenOffline: s.NotifyWhenOffline,
-		SelfNodeAnnouncement: func(refresh bool) (lnwire.NodeAnnouncement, error) {
-			return s.genNodeAnnouncement(refresh)
+		Router:                s.chanRouter,
+		Notifier:              s.cc.ChainNotifier,
+		ChainHash:             *s.cfg.ActiveNetParams.GenesisHash,
+		Broadcast:             s.BroadcastMessage,
+		ChanSeries:            chanSeries,
+		NotifyWhenOnline:      s.NotifyWhenOnline,
+		NotifyWhenOffline:     s.NotifyWhenOffline,
+		FetchSelfAnnouncement: s.getNodeAnnouncement,
+		UpdateSelfAnnouncement: func() (lnwire.NodeAnnouncement,
+			error) {
+
+			return s.genNodeAnnouncement(nil)
 		},
 		ProofMatureDelta:        0,
 		TrickleDelay:            time.Millisecond * time.Duration(cfg.TrickleDelay),
@@ -1057,7 +1062,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		FeeEstimator:   cc.FeeEstimator,
 		GenSweepScript: newSweepPkScriptGen(cc.Wallet),
 		Signer:         cc.Wallet.Cfg.Signer,
-		Wallet:         cc.Wallet,
+		Wallet:         newSweeperWallet(cc.Wallet),
 		NewBatchTimer: func() <-chan time.Time {
 			return time.NewTimer(cfg.Sweeper.BatchWindowDuration).C
 		},
@@ -1149,6 +1154,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		},
 		PreimageDB:   s.witnessBeacon,
 		Notifier:     cc.ChainNotifier,
+		Mempool:      cc.MempoolNotifier,
 		Signer:       cc.Wallet.Cfg.Signer,
 		FeeEstimator: cc.FeeEstimator,
 		ChainIO:      cc.ChainIO,
@@ -1271,7 +1277,18 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		return ourPolicy, err
 	}
 
+	// Get the development config for funding manager. If we are not in
+	// development mode, this would be nil.
+	var devCfg *funding.DevConfig
+	if lncfg.IsDevBuild() {
+		devCfg = &funding.DevConfig{
+			ProcessChannelReadyWait: cfg.Dev.ChannelReadyWait(),
+		}
+	}
+
+	//nolint:lll
 	s.fundingMgr, err = funding.NewFundingManager(funding.Config{
+		Dev:                devCfg,
 		NoWumboChans:       !cfg.ProtocolOptions.Wumbo(),
 		IDKey:              nodeKeyDesc.PubKey,
 		IDKeyLoc:           nodeKeyDesc.KeyLocator,
@@ -1283,8 +1300,10 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		Notifier:     cc.ChainNotifier,
 		FeeEstimator: cc.FeeEstimator,
 		SignMessage:  cc.MsgSigner.SignMessage,
-		CurrentNodeAnnouncement: func() (lnwire.NodeAnnouncement, error) {
-			return s.genNodeAnnouncement(true)
+		CurrentNodeAnnouncement: func() (lnwire.NodeAnnouncement,
+			error) {
+
+			return s.genNodeAnnouncement(nil)
 		},
 		SendAnnouncement:     s.authGossiper.ProcessLocalAnnouncement,
 		NotifyWhenOnline:     s.NotifyWhenOnline,
@@ -1440,8 +1459,9 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		RegisteredChains:              cfg.registeredChains,
 		MaxAnchorsCommitFeeRate: chainfee.SatPerKVByte(
 			s.cfg.MaxCommitFeeRateAnchors * 1000).FeePerKWeight(),
-		DeleteAliasEdge: deleteAliasEdge,
-		AliasManager:    s.aliasMgr,
+		DeleteAliasEdge:          deleteAliasEdge,
+		AliasManager:             s.aliasMgr,
+		UpdateForwardingPolicies: s.htlcSwitch.UpdateForwardingPolicies,
 	})
 	if err != nil {
 		return nil, err
@@ -1488,15 +1508,15 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 	if cfg.WtClient.Active {
 		policy := wtpolicy.DefaultPolicy()
+		policy.MaxUpdates = cfg.WtClient.MaxUpdates
 
-		if cfg.WtClient.SweepFeeRate != 0 {
-			// We expose the sweep fee rate in sat/vbyte, but the
-			// tower protocol operations on sat/kw.
-			sweepRateSatPerVByte := chainfee.SatPerKVByte(
-				1000 * cfg.WtClient.SweepFeeRate,
-			)
-			policy.SweepFeeRate = sweepRateSatPerVByte.FeePerKWeight()
-		}
+		// We expose the sweep fee rate in sat/vbyte, but the tower
+		// protocol operations on sat/kw.
+		sweepRateSatPerVByte := chainfee.SatPerKVByte(
+			1000 * cfg.WtClient.SweepFeeRate,
+		)
+
+		policy.SweepFeeRate = sweepRateSatPerVByte.FeePerKWeight()
 
 		if err := policy.Validate(); err != nil {
 			return nil, err
@@ -1513,18 +1533,54 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 			)
 		}
 
+		// buildBreachRetribution is a call-back that can be used to
+		// query the BreachRetribution info and channel type given a
+		// channel ID and commitment height.
+		buildBreachRetribution := func(chanID lnwire.ChannelID,
+			commitHeight uint64) (*lnwallet.BreachRetribution,
+			channeldb.ChannelType, error) {
+
+			channel, err := s.chanStateDB.FetchChannelByID(
+				nil, chanID,
+			)
+			if err != nil {
+				return nil, 0, err
+			}
+
+			br, err := lnwallet.NewBreachRetribution(
+				channel, commitHeight, 0, nil,
+			)
+			if err != nil {
+				return nil, 0, err
+			}
+
+			return br, channel.ChanType, nil
+		}
+
+		fetchClosedChannel := s.chanStateDB.FetchClosedChannelForID
+
 		s.towerClient, err = wtclient.New(&wtclient.Config{
-			Signer:         cc.Wallet.Cfg.Signer,
-			NewAddress:     newSweepPkScriptGen(cc.Wallet),
-			SecretKeyRing:  s.cc.KeyRing,
-			Dial:           cfg.net.Dial,
-			AuthDial:       authDial,
-			DB:             dbs.TowerClientDB,
-			Policy:         policy,
-			ChainHash:      *s.cfg.ActiveNetParams.GenesisHash,
-			MinBackoff:     10 * time.Second,
-			MaxBackoff:     5 * time.Minute,
-			ForceQuitDelay: wtclient.DefaultForceQuitDelay,
+			FetchClosedChannel:     fetchClosedChannel,
+			BuildBreachRetribution: buildBreachRetribution,
+			SessionCloseRange:      cfg.WtClient.SessionCloseRange,
+			ChainNotifier:          s.cc.ChainNotifier,
+			SubscribeChannelEvents: func() (subscribe.Subscription,
+				error) {
+
+				return s.channelNotifier.
+					SubscribeChannelEvents()
+			},
+			Signer:             cc.Wallet.Cfg.Signer,
+			NewAddress:         newSweepPkScriptGen(cc.Wallet),
+			SecretKeyRing:      s.cc.KeyRing,
+			Dial:               cfg.net.Dial,
+			AuthDial:           authDial,
+			DB:                 dbs.TowerClientDB,
+			Policy:             policy,
+			ChainHash:          *s.cfg.ActiveNetParams.GenesisHash,
+			MinBackoff:         10 * time.Second,
+			MaxBackoff:         5 * time.Minute,
+			MaxTasksInMemQueue: cfg.WtClient.MaxTasksInMemQueue,
 		})
 		if err != nil {
 			return nil, err
@@ -1537,17 +1593,27 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 			blob.Type(blob.FlagAnchorChannel)
 
 		s.anchorTowerClient, err = wtclient.New(&wtclient.Config{
-			Signer:         cc.Wallet.Cfg.Signer,
-			NewAddress:     newSweepPkScriptGen(cc.Wallet),
-			SecretKeyRing:  s.cc.KeyRing,
-			Dial:           cfg.net.Dial,
-			AuthDial:       authDial,
-			DB:             dbs.TowerClientDB,
-			Policy:         anchorPolicy,
-			ChainHash:      *s.cfg.ActiveNetParams.GenesisHash,
-			MinBackoff:     10 * time.Second,
-			MaxBackoff:     5 * time.Minute,
-			ForceQuitDelay: wtclient.DefaultForceQuitDelay,
+			FetchClosedChannel:     fetchClosedChannel,
+			BuildBreachRetribution: buildBreachRetribution,
+			SessionCloseRange:      cfg.WtClient.SessionCloseRange,
+			ChainNotifier:          s.cc.ChainNotifier,
+			SubscribeChannelEvents: func() (subscribe.Subscription,
+				error) {
+
+				return s.channelNotifier.
+					SubscribeChannelEvents()
+			},
+			Signer:             cc.Wallet.Cfg.Signer,
+			NewAddress:         newSweepPkScriptGen(cc.Wallet),
+			SecretKeyRing:      s.cc.KeyRing,
+			Dial:               cfg.net.Dial,
+			AuthDial:           authDial,
+			DB:                 dbs.TowerClientDB,
+			Policy:             anchorPolicy,
+			ChainHash:          *s.cfg.ActiveNetParams.GenesisHash,
+			MinBackoff:         10 * time.Second,
+			MaxBackoff:         5 * time.Minute,
+			MaxTasksInMemQueue: cfg.WtClient.MaxTasksInMemQueue,
 		})
 		if err != nil {
 			return nil, err
@@ -1569,8 +1635,15 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 					cfg.net.ResolveTCPAddr,
 				)
 			},
-			AdvertisedIPs:  advertisedIPs,
-			AnnounceNewIPs: netann.IPAnnouncer(s.genNodeAnnouncement),
+			AdvertisedIPs: advertisedIPs,
+			AnnounceNewIPs: netann.IPAnnouncer(
+				func(modifier ...netann.NodeAnnModifier) (
+					lnwire.NodeAnnouncement, error) {
+
+					return s.genNodeAnnouncement(
+						nil, modifier...,
+					)
+				}),
 		})
 	}
 
@@ -2420,12 +2493,8 @@ out:
 			// throughout the network. We'll only include addresses
 			// that have a different IP from the previous one, as
 			// the previous IP is no longer valid.
-			currentNodeAnn, err := s.genNodeAnnouncement(false)
-			if err != nil {
-				srvrLog.Debugf("Unable to retrieve current "+
-					"node announcement: %v", err)
-				continue
-			}
+			currentNodeAnn := s.getNodeAnnouncement()
+
 			for _, addr := range currentNodeAnn.Addresses {
 				host, _, err := net.SplitHostPort(addr.String())
 				if err != nil {
@@ -2447,7 +2516,7 @@ out:
 			// announcement with the updated addresses and broadcast
 			// it to our peers.
 			newNodeAnn, err := s.genNodeAnnouncement(
-				true, netann.NodeAnnSetAddrs(newAddrs),
+				nil, netann.NodeAnnSetAddrs(newAddrs),
 			)
 			if err != nil {
 				srvrLog.Debugf("Unable to generate new node "+
@@ -2836,7 +2905,7 @@ func (s *server) createNewHiddenService() error {
 	// Now that the onion service has been created, we'll add the onion
 	// address it can be reached at to our list of advertised addresses.
 	newNodeAnn, err := s.genNodeAnnouncement(
-		true, func(currentAnn *lnwire.NodeAnnouncement) {
+		nil, func(currentAnn *lnwire.NodeAnnouncement) {
 			currentAnn.Addresses = append(currentAnn.Addresses, addr)
 		},
 	)
@@ -2886,30 +2955,54 @@ func (s *server) findChannel(node *btcec.PublicKey, chanID lnwire.ChannelID) (
 	return nil, fmt.Errorf("unable to find channel")
 }
 
+// getNodeAnnouncement fetches the current, fully signed node announcement.
+func (s *server) getNodeAnnouncement() lnwire.NodeAnnouncement {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return *s.currentNodeAnn
+}
+
 // genNodeAnnouncement generates and returns the current fully signed node
-// announcement. If refresh is true, then the time stamp of the announcement
-// will be updated in order to ensure it propagates through the network.
-func (s *server) genNodeAnnouncement(refresh bool,
+// announcement. The time stamp of the announcement will be updated in order
+// to ensure it propagates through the network.
+func (s *server) genNodeAnnouncement(features *lnwire.RawFeatureVector,
 	modifiers ...netann.NodeAnnModifier) (lnwire.NodeAnnouncement, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// If we don't need to refresh the announcement, then we can return a
-	// copy of our cached version.
-	if !refresh {
-		return *s.currentNodeAnn, nil
+	// First, try to update our feature manager with the updated set of
+	// features.
+	if features != nil {
+		proposedFeatures := map[feature.Set]*lnwire.RawFeatureVector{
+			feature.SetNodeAnn: features,
+		}
+		err := s.featureMgr.UpdateFeatureSets(proposedFeatures)
+		if err != nil {
+			return lnwire.NodeAnnouncement{}, err
+		}
+
+		// If we could successfully update our feature manager, add
+		// an update modifier to include these new features to our
+		// set.
+		modifiers = append(
+			modifiers, netann.NodeAnnSetFeatures(features),
+		)
 	}
 
 	// Always update the timestamp when refreshing to ensure the update
 	// propagates.
 	modifiers = append(modifiers, netann.NodeAnnSetTimestamp)
 
-	// Otherwise, we'll sign a new update after applying all of the passed
-	// modifiers.
+	// Apply the requested changes to the node announcement.
+	for _, modifier := range modifiers {
+		modifier(s.currentNodeAnn)
+	}
+
+	// Sign a new update after applying all of the passed modifiers.
 	err := netann.SignNodeAnnouncement(
 		s.nodeSigner, s.identityKeyLoc, s.currentNodeAnn,
-		modifiers...,
 	)
 	if err != nil {
 		return lnwire.NodeAnnouncement{}, err
@@ -2922,10 +3015,10 @@ func (s *server) genNodeAnnouncement(refresh bool,
 // applying the giving modifiers and updating the time stamp
 // to ensure it propagates through the network. Then it brodcasts
 // it to the network.
-func (s *server) updateAndBrodcastSelfNode(
+func (s *server) updateAndBrodcastSelfNode(features *lnwire.RawFeatureVector,
 	modifiers ...netann.NodeAnnModifier) error {
 
-	newNodeAnn, err := s.genNodeAnnouncement(true, modifiers...)
+	newNodeAnn, err := s.genNodeAnnouncement(features, modifiers...)
 	if err != nil {
 		return fmt.Errorf("unable to generate new node "+
 			"announcement: %v", err)
@@ -2943,9 +3036,7 @@ func (s *server) updateAndBrodcastSelfNode(
 	selfNode.LastUpdate = time.Unix(int64(newNodeAnn.Timestamp), 0)
 	selfNode.Addresses = newNodeAnn.Addresses
 	selfNode.Alias = newNodeAnn.Alias.String()
-	selfNode.Features = lnwire.NewFeatureVector(
-		newNodeAnn.Features, lnwire.Features,
-	)
+	selfNode.Features = s.featureMgr.Get(feature.SetNodeAnn)
 	selfNode.Color = newNodeAnn.RGBColor
 	selfNode.AuthSigBytes = newNodeAnn.Signature.ToSignatureBytes()
 
@@ -2954,11 +3045,6 @@ func (s *server) updateAndBrodcastSelfNode(
 	if err := s.graphDB.SetSourceNode(selfNode); err != nil {
 		return fmt.Errorf("can't set self node: %v", err)
 	}
-
-	// Update the feature bits for the SetNodeAnn in case they changed.
-	s.featureMgr.SetRaw(
-		feature.SetNodeAnn, selfNode.Features.RawFeatureVector,
-	)
 
 	// Finally, propagate it to the nodes in the network.
 	err = s.BroadcastMessage(nil, &newNodeAnn)
@@ -3765,7 +3851,11 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		TowerClient:             s.towerClient,
 		AnchorTowerClient:       s.anchorTowerClient,
 		DisconnectPeer:          s.DisconnectPeer,
-		GenNodeAnnouncement:     s.genNodeAnnouncement,
+		GenNodeAnnouncement: func(...netann.NodeAnnModifier) (
+			lnwire.NodeAnnouncement, error) {
+
+			return s.genNodeAnnouncement(nil)
+		},
 
 		PongBuf: s.pongBuf,
 
@@ -3931,6 +4021,7 @@ func (s *server) peerTerminationWatcher(p *peer.Brontide, ready chan struct{}) {
 	// If the server is exiting then we can bail out early ourselves as all
 	// the other sub-systems will already be shutting down.
 	if s.Stopped() {
+		srvrLog.Debugf("Server quitting, exit early for peer %v", p)
 		return
 	}
 

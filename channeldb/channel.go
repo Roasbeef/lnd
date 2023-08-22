@@ -200,6 +200,10 @@ var (
 	// ErrMissingIndexEntry is returned when a caller attempts to close a
 	// channel and the outpoint is missing from the index.
 	ErrMissingIndexEntry = fmt.Errorf("missing outpoint from index")
+
+	// ErrOnionBlobLength is returned is an onion blob with incorrect
+	// length is read from disk.
+	ErrOnionBlobLength = errors.New("onion blob < 1366 bytes")
 )
 
 const (
@@ -222,6 +226,10 @@ const (
 	// A tlv type definition used to serialize and deserialize the
 	// confirmed ShortChannelID for a zero-conf channel.
 	realScidType tlv.Type = 4
+
+	// A tlv type definition used to serialize and deserialize the
+	// Memo for the channel channel.
+	channelMemoType tlv.Type = 5
 )
 
 // indexStatus is an enum-like type that describes what state the
@@ -829,6 +837,10 @@ type OpenChannel struct {
 	// default ShortChannelID. This is only set for zero-conf channels.
 	confirmedScid lnwire.ShortChannelID
 
+	// Memo is any arbitrary information we wish to store locally about the
+	// channel that will be useful to our future selves.
+	Memo []byte
+
 	// TODO(roasbeef): eww
 	Db *ChannelStateDB
 
@@ -1356,7 +1368,7 @@ func (c *OpenChannel) MarkBorked() error {
 }
 
 // SecondCommitmentPoint returns the second per-commitment-point for use in the
-// funding_locked message.
+// channel_ready message.
 func (c *OpenChannel) SecondCommitmentPoint() (*btcec.PublicKey, error) {
 	c.RLock()
 	defer c.RUnlock()
@@ -2088,7 +2100,7 @@ func (c *OpenChannel) ActiveHtlcs() []HTLC {
 	// which ones are present on their commitment.
 	remoteHtlcs := make(map[[32]byte]struct{})
 	for _, htlc := range c.RemoteCommitment.Htlcs {
-		onionHash := sha256.Sum256(htlc.OnionBlob)
+		onionHash := sha256.Sum256(htlc.OnionBlob[:])
 		remoteHtlcs[onionHash] = struct{}{}
 	}
 
@@ -2096,7 +2108,7 @@ func (c *OpenChannel) ActiveHtlcs() []HTLC {
 	// as active if *we* know them as well.
 	activeHtlcs := make([]HTLC, 0, len(remoteHtlcs))
 	for _, htlc := range c.LocalCommitment.Htlcs {
-		onionHash := sha256.Sum256(htlc.OnionBlob)
+		onionHash := sha256.Sum256(htlc.OnionBlob[:])
 		if _, ok := remoteHtlcs[onionHash]; !ok {
 			continue
 		}
@@ -2143,7 +2155,7 @@ type HTLC struct {
 
 	// OnionBlob is an opaque blob which is used to complete multi-hop
 	// routing.
-	OnionBlob []byte
+	OnionBlob [lnwire.OnionPacketSize]byte
 
 	// HtlcIndex is the HTLC counter index of this active, outstanding
 	// HTLC. This differs from the LogIndex, as the HtlcIndex is only
@@ -2155,10 +2167,38 @@ type HTLC struct {
 	// from the HtlcIndex as this will be incremented for each new log
 	// update added.
 	LogIndex uint64
+
+	// ExtraData contains any additional information that was transmitted
+	// with the HTLC via TLVs. This data *must* already be encoded as a
+	// TLV stream, and may be empty. The length of this data is naturally
+	// limited by the space available to TLVs in update_add_htlc:
+	// = 65535 bytes (bolt 8 maximum message size):
+	// - 2 bytes (bolt 1 message_type)
+	// - 32 bytes (channel_id)
+	// - 8 bytes (id)
+	// - 8 bytes (amount_msat)
+	// - 32 bytes (payment_hash)
+	// - 4 bytes (cltv_expiry
+	// - 1366 bytes (onion_routing_packet)
+	// = 64083 bytes maximum possible TLV stream
+	//
+	// Note that this extra data is stored inline with the OnionBlob for
+	// legacy reasons, see serialization/deserialization functions for
+	// detail.
+	ExtraData []byte
 }
 
 // SerializeHtlcs writes out the passed set of HTLC's into the passed writer
 // using the current default on-disk serialization format.
+//
+// This inline serialization has been extended to allow storage of extra data
+// associated with a HTLC in the following way:
+//   - The known-length onion blob (1366 bytes) is serialized as var bytes in
+//     WriteElements (ie, the length 1366 was written, followed by the 1366
+//     onion bytes).
+//   - To include extra data, we append any extra data present to this one
+//     variable length of data. Since we know that the onion is strictly 1366
+//     bytes, any length after that should be considered to be extra data.
 //
 // NOTE: This API is NOT stable, the on-disk format will likely change in the
 // future.
@@ -2169,9 +2209,17 @@ func SerializeHtlcs(b io.Writer, htlcs ...HTLC) error {
 	}
 
 	for _, htlc := range htlcs {
+		// The onion blob and hltc data are stored as a single var
+		// bytes blob.
+		onionAndExtraData := make(
+			[]byte, lnwire.OnionPacketSize+len(htlc.ExtraData),
+		)
+		copy(onionAndExtraData, htlc.OnionBlob[:])
+		copy(onionAndExtraData[lnwire.OnionPacketSize:], htlc.ExtraData)
+
 		if err := WriteElements(b,
 			htlc.Signature, htlc.RHash, htlc.Amt, htlc.RefundTimeout,
-			htlc.OutputIndex, htlc.Incoming, htlc.OnionBlob[:],
+			htlc.OutputIndex, htlc.Incoming, onionAndExtraData,
 			htlc.HtlcIndex, htlc.LogIndex,
 		); err != nil {
 			return err
@@ -2184,6 +2232,17 @@ func SerializeHtlcs(b io.Writer, htlcs ...HTLC) error {
 // DeserializeHtlcs attempts to read out a slice of HTLC's from the passed
 // io.Reader. The bytes within the passed reader MUST have been previously
 // written to using the SerializeHtlcs function.
+//
+// This inline deserialization has been extended to allow storage of extra data
+// associated with a HTLC in the following way:
+//   - The known-length onion blob (1366 bytes) and any additional data present
+//     are read out as a single blob of variable byte data.
+//   - They are stored like this to take advantage of the variable space
+//     available for extension without migration (see SerializeHtlcs).
+//   - The first 1366 bytes are interpreted as the onion blob, and any remaining
+//     bytes as extra HTLC data.
+//   - This extra HTLC data is expected to be serialized as a TLV stream, and
+//     its parsing is left to higher layers.
 //
 // NOTE: This API is NOT stable, the on-disk format will likely change in the
 // future.
@@ -2200,13 +2259,40 @@ func DeserializeHtlcs(r io.Reader) ([]HTLC, error) {
 
 	htlcs = make([]HTLC, numHtlcs)
 	for i := uint16(0); i < numHtlcs; i++ {
+		var onionAndExtraData []byte
 		if err := ReadElements(r,
 			&htlcs[i].Signature, &htlcs[i].RHash, &htlcs[i].Amt,
 			&htlcs[i].RefundTimeout, &htlcs[i].OutputIndex,
-			&htlcs[i].Incoming, &htlcs[i].OnionBlob,
+			&htlcs[i].Incoming, &onionAndExtraData,
 			&htlcs[i].HtlcIndex, &htlcs[i].LogIndex,
 		); err != nil {
 			return htlcs, err
+		}
+
+		// Sanity check that we have at least the onion blob size we
+		// expect.
+		if len(onionAndExtraData) < lnwire.OnionPacketSize {
+			return nil, ErrOnionBlobLength
+		}
+
+		// First OnionPacketSize bytes are our fixed length onion
+		// packet.
+		copy(
+			htlcs[i].OnionBlob[:],
+			onionAndExtraData[0:lnwire.OnionPacketSize],
+		)
+
+		// Any additional bytes belong to extra data. ExtraDataLen
+		// will be >= 0, because we know that we always have a fixed
+		// length onion packet.
+		extraDataLen := len(onionAndExtraData) - lnwire.OnionPacketSize
+		if extraDataLen > 0 {
+			htlcs[i].ExtraData = make([]byte, extraDataLen)
+
+			copy(
+				htlcs[i].ExtraData,
+				onionAndExtraData[lnwire.OnionPacketSize:],
+			)
 		}
 	}
 
@@ -3627,7 +3713,7 @@ func deserializeCloseChannelSummary(r io.Reader) (*ChannelCloseSummary, error) {
 
 	// Finally, we'll attempt to read the next unrevoked commitment point
 	// for the remote party. If we closed the channel before receiving a
-	// funding locked message then this might not be present. A boolean
+	// channel_ready message then this might not be present. A boolean
 	// indicating whether the field is present will come first.
 	var hasRemoteNextRevocation bool
 	err = ReadElements(r, &hasRemoteNextRevocation)
@@ -3737,6 +3823,7 @@ func putChanInfo(chanBucket kvdb.RwBucket, channel *OpenChannel) error {
 			initialRemoteBalanceType, &remoteBalance,
 		),
 		MakeScidRecord(realScidType, &channel.confirmedScid),
+		tlv.MakePrimitiveRecord(channelMemoType, &channel.Memo),
 	)
 	if err != nil {
 		return err
@@ -3863,7 +3950,7 @@ func putChanRevocationState(chanBucket kvdb.RwBucket, channel *OpenChannel) erro
 	}
 
 	// If the next revocation is present, which is only the case after the
-	// FundingLocked message has been sent, then we'll write it to disk.
+	// ChannelReady message has been sent, then we'll write it to disk.
 	if channel.RemoteNextRevocation != nil {
 		err = WriteElements(&b, channel.RemoteNextRevocation)
 		if err != nil {
@@ -3932,10 +4019,11 @@ func fetchChanInfo(chanBucket kvdb.RBucket, channel *OpenChannel) error {
 		}
 	}
 
-	// Create balance fields in uint64.
+	// Create balance fields in uint64, and Memo field as byte slice.
 	var (
 		localBalance  uint64
 		remoteBalance uint64
+		memo          []byte
 	)
 
 	// Create the tlv stream.
@@ -3952,6 +4040,7 @@ func fetchChanInfo(chanBucket kvdb.RBucket, channel *OpenChannel) error {
 			initialRemoteBalanceType, &remoteBalance,
 		),
 		MakeScidRecord(realScidType, &channel.confirmedScid),
+		tlv.MakePrimitiveRecord(channelMemoType, &memo),
 	)
 	if err != nil {
 		return err
@@ -3964,6 +4053,11 @@ func fetchChanInfo(chanBucket kvdb.RBucket, channel *OpenChannel) error {
 	// Attach the balance fields.
 	channel.InitialLocalBalance = lnwire.MilliSatoshi(localBalance)
 	channel.InitialRemoteBalance = lnwire.MilliSatoshi(remoteBalance)
+
+	// Attach the memo field if non-empty.
+	if len(memo) > 0 {
+		channel.Memo = memo
+	}
 
 	channel.Packager = NewChannelPackager(channel.ShortChannelID)
 
