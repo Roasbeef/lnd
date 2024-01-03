@@ -17,6 +17,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/prometheus/common/log"
 )
 
 var (
@@ -429,8 +430,8 @@ func (c *ChanCloser) NegotiationHeight() uint32 {
 // upfront script is set, we check whether it matches the script provided by
 // our peer. If they do not match, we use the disconnect function provided to
 // disconnect from the peer.
-func validateShutdownScript(disconnect func() error, upfrontScript,
-	peerScript lnwire.DeliveryAddress, netParams *chaincfg.Params) error {
+func validateShutdownScript(upfrontScript, peerScript lnwire.DeliveryAddress,
+	netParams *chaincfg.Params) error {
 
 	// Either way, we'll make sure that the script passed meets our
 	// standards. The upfrontScript should have already been checked at an
@@ -457,12 +458,6 @@ func validateShutdownScript(disconnect func() error, upfrontScript,
 	if !bytes.Equal(upfrontScript, peerScript) {
 		chancloserLog.Warnf("peer's script: %x does not match upfront "+
 			"shutdown script: %x", peerScript, upfrontScript)
-
-		// Disconnect from the peer because they have violated option upfront
-		// shutdown.
-		if err := disconnect(); err != nil {
-			return err
-		}
 
 		return ErrUpfrontShutdownScriptMismatch
 	}
@@ -512,12 +507,19 @@ func (c *ChanCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message,
 			}
 		}
 
-		// If the remote node opened the channel with option upfront shutdown
-		// script, check that the script they provided matches.
+		// If the remote node opened the channel with option upfront
+		// shutdown script, check that the script they provided
+		// matches.
 		if err := validateShutdownScript(
-			c.cfg.Disconnect, c.cfg.Channel.RemoteUpfrontShutdownScript(),
+			c.cfg.Channel.RemoteUpfrontShutdownScript(),
 			shutdownMsg.Address, c.cfg.ChainParams,
 		); err != nil {
+
+			if err := c.cfg.Disconnect(); err != nil {
+				log.Warnf("unable to disconnect from "+
+					"peer: %v", err)
+			}
+
 			return nil, false, err
 		}
 
@@ -586,17 +588,24 @@ func (c *ChanCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message,
 		// Otherwise, this is an attempted invalid state transition.
 		shutdownMsg, ok := msg.(*lnwire.Shutdown)
 		if !ok {
-			return nil, false, fmt.Errorf("expected lnwire.Shutdown, instead "+
-				"have %v", spew.Sdump(msg))
+			return nil, false, fmt.Errorf("expected "+
+				"lnwire.Shutdown, instead "+"have %v",
+				spew.Sdump(msg))
 		}
 
-		// If the remote node opened the channel with option upfront shutdown
-		// script, check that the script they provided matches.
+		// If the remote node opened the channel with option upfront
+		// shutdown script, check that the script they provided
+		// matches.
 		if err := validateShutdownScript(
-			c.cfg.Disconnect,
-			c.cfg.Channel.RemoteUpfrontShutdownScript(), shutdownMsg.Address,
-			c.cfg.ChainParams,
+			c.cfg.Channel.RemoteUpfrontShutdownScript(),
+			shutdownMsg.Address, c.cfg.ChainParams,
 		); err != nil {
+
+			if err := c.cfg.Disconnect(); err != nil {
+				log.Warnf("unable to disconnect from "+
+					"peer: %v", err)
+			}
+
 			return nil, false, err
 		}
 

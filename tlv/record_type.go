@@ -8,7 +8,7 @@ import (
 
 // RecordT is a high-order type makes it easy to encode known "primitive" types
 // as TLV records.
-type RecordT[T TlvTypes, V any] struct {
+type RecordT[T TlvType, V any] struct {
 	// recordType is the type of the TLV record.
 	recordType T
 
@@ -18,11 +18,25 @@ type RecordT[T TlvTypes, V any] struct {
 	Val V
 }
 
+// RecordProducerT is a type-aware wrapper around the normal RecordProducer
+// interface.
+type RecordProducerT[T any] interface {
+	RecordProducer
+
+	// This is a non-interface type constraint that allows us to pass a
+	// concrete type as a type parameter rather than a pointer to the type
+	// that satisfies the Record interface.
+	*T
+}
+
 // NewRecordT creates a new RecordT type from a given RecordProducer type. This
 // is useful to wrap a given record in this utility type, which also serves as
 // an extra type annotation. The underlying type of the record is retained.
-func NewRecordT[T TlvTypes, V RecordProducer](record V) RecordT[T, V] {
-	return RecordT[T, V]{
+func NewRecordT[T TlvType, K any, V RecordProducerT[K]](
+	record K,
+) RecordT[T, K] {
+
+	return RecordT[T, K]{
 		Val: record,
 	}
 }
@@ -35,7 +49,7 @@ type Primitive interface {
 }
 
 // NewPrimitiveRecord creates a new RecordT type from a given primitive type.
-func NewPrimitiveRecord[T TlvTypes, V Primitive](val V) RecordT[T, V] {
+func NewPrimitiveRecord[T TlvType, V Primitive](val V) RecordT[T, V] {
 	return RecordT[T, V]{
 		Val: val,
 	}
@@ -45,22 +59,51 @@ func NewPrimitiveRecord[T TlvTypes, V Primitive](val V) RecordT[T, V] {
 func (t *RecordT[T, V]) Record() Record {
 	// Go doesn't allow type assertions on a type param, so to work around
 	// this, we'll convert to any, then do our type assertion.
-	tlvRecord, ok := any(t.Val).(RecordProducer)
+	tlvRecord, ok := any(&t.Val).(RecordProducer)
 	if !ok {
-		return MakePrimitiveRecord(GetTypeVal(t.recordType), &t.Val)
+		return MakePrimitiveRecord(
+			t.recordType.typeVal(), &t.Val,
+		)
 	}
 
-	return tlvRecord.Record()
+	// To enforce proper usage of the RecordT type, we'll make a wrapper
+	// record that uses the proper internal type value.
+	ogRecord := tlvRecord.Record()
+
+	return Record{
+		value:      ogRecord.value,
+		typ:        t.recordType.typeVal(),
+		staticSize: ogRecord.staticSize,
+		sizeFunc:   ogRecord.sizeFunc,
+		encoder:    ogRecord.encoder,
+		decoder:    ogRecord.decoder,
+	}
 }
 
 // OptionalRecordT is a high-order type that represents an optional TLV record.
 // This can be used when a TLV record doesn't always need to be present (ok to
 // be odd).
-type OptionalRecordT[T TlvTypes, V any] struct {
+type OptionalRecordT[T TlvType, V any] struct {
 	fn.Option[RecordT[T, V]]
 }
 
-func ZeroRecordT[T TlvTypes, V any]() RecordT[T, V] {
+// WhenSomeV executes the given function if the optional record is present.
+// This operates on the inner most type, V, which is the value of the record.
+func (t *OptionalRecordT[T, V]) WhenSomeV(f func(V)) {
+	t.Option.WhenSome(func(r RecordT[T, V]) {
+		f(r.Val)
+	})
+}
+
+// SomeRecordT creates a new OptionalRecordT type from a given RecordT type.
+func SomeRecordT[T TlvType, V any](record RecordT[T, V]) OptionalRecordT[T, V] {
+	return OptionalRecordT[T, V]{
+		Option: fn.Some(record),
+	}
+}
+
+// ZeroRecordT returns a zero value of the RecordT type.
+func ZeroRecordT[T TlvType, V any]() RecordT[T, V] {
 	var v V
 	return RecordT[T, V]{
 		Val: v,
