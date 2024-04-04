@@ -39,6 +39,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chanfunding"
 	"github.com/lightningnetwork/lnd/lnwallet/rpcwallet"
 	"github.com/lightningnetwork/lnd/monitoring"
+	"github.com/lightningnetwork/lnd/msgmux"
 	"github.com/lightningnetwork/lnd/netann"
 	"github.com/lightningnetwork/lnd/peer"
 	"github.com/lightningnetwork/lnd/peernotifier"
@@ -186,6 +187,9 @@ func SetupLoggers(root *build.RotatingLogWriter, interceptor signal.Interceptor)
 	AddSubLogger(root, lncfg.Subsystem, interceptor, lncfg.UseLogger)
 	AddSubLogger(
 		root, blindedpath.Subsystem, interceptor, blindedpath.UseLogger,
+	)
+	AddSubLogger(
+		root, msgmux.Subsystem, interceptor, msgmux.UseLogger,
 	)
 }
 
