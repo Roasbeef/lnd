@@ -218,10 +218,14 @@ type ChannelReservation struct {
 
 	fundingIntent chanfunding.Intent
 
-	// initAuxLeaves is an optional set of aux commitment leaves that'll
-	// modify the way we construct the commitment transaction, in
+	// localInitAuxLeaves is an optional set of aux commitment leaves
+	// that'll modify the way we construct the commitment transaction, in
 	// particular the tapscript leaves.
-	initAuxLeaves fn.Option[CommitAuxLeaves]
+	localInitAuxLeaves fn.Option[CommitAuxLeaves]
+
+	// remoteInitAuxLeaves is an optional set of aux commitment leaves for
+	// the remote party.
+	remoteInitAuxLeaves fn.Option[CommitAuxLeaves]
 
 	// nextRevocationKeyLoc stores the key locator information for this
 	// channel.

@@ -108,9 +108,13 @@ type AuxFundingDesc struct {
 	// first commitment entry for the remote party.
 	CustomRemoteCommitBlob tlv.Blob
 
-	// InitAuxLeaves is the set of aux leaves that'll be used for the very
-	// first commitment state.
-	InitAuxLeaves CommitAuxLeaves
+	// LocalInitAuxLeaves is the set of aux leaves that'll be used for our
+	// very first commitment state.
+	LocalInitAuxLeaves CommitAuxLeaves
+
+	// RemoteInitAuxLeaves is the set of aux leaves that'll be used for the
+	// very first commitment state for the remote party.
+	RemoteInitAuxLeaves CommitAuxLeaves
 }
 
 // InitFundingReserveMsg is the first message sent to initiate the workflow
@@ -1481,6 +1485,8 @@ func defaultCommitOpts() createCommitOpts {
 
 // WithAuxLeaves is a functional option that can be used to set the aux leaves
 // for a new commitment transaction.
+//
+// TODO(roasbeef): local+remote  leaves
 func WithAuxLeaves(leaves fn.Option[CommitAuxLeaves]) CreateCommitOpt {
 	return func(o *createCommitOpts) {
 		o.auxLeaves = leaves
@@ -2307,6 +2313,10 @@ func (l *LightningWallet) handleSingleFunderSigs(req *addSingleFunderSigsMsg) {
 	// Grab the mutex on the ChannelReservation to ensure thread-safety
 	pendingReservation.Lock()
 	defer pendingReservation.Unlock()
+
+	// TODO(roasbeef): get funding desc
+	//  * set all blobs
+	//  * get the local+remote commitAux leaves for below commitment txns
 
 	chanState := pendingReservation.partialState
 	chanType := pendingReservation.partialState.ChanType
