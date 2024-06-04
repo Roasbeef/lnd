@@ -15,3 +15,9 @@ func Reduce[T any, V any, S []V](s S, f Reducer[T, V]) T {
 
 	return accum
 }
+
+// Zero returns the zero value of the specified type.
+func Zero[T any]() T {
+	var zero T
+	return zero
+}
