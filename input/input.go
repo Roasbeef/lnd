@@ -65,6 +65,10 @@ type Input interface {
 	// UnconfParent returns information about a possibly unconfirmed parent
 	// tx.
 	UnconfParent() *TxInfo
+
+	// ResolutionBlob returns a special opaque blob to be used to
+	// sweep/resolve this input.
+	ResolutionBlob() fn.Option[tlv.Blob]
 }
 
 // TxInfo describes properties of a parent tx that are relevant for CPFP.
@@ -108,6 +112,8 @@ type inputKit struct {
 	// unconfParent contains information about a potential unconfirmed
 	// parent transaction.
 	unconfParent *TxInfo
+
+	resolutionBlob fn.Option[tlv.Blob]
 }
 
 // OutPoint returns the breached output's identifier that is to be included as
@@ -158,8 +164,15 @@ func (i *inputKit) UnconfParent() *TxInfo {
 	return i.unconfParent
 }
 
+// ResolutionBlob...
+func (i *inputKit) ResolutionBlob() fn.Option[tlv.Blob] {
+	return i.resolutionBlob
+}
+
 // inputOpts..
 type inputOpts struct {
+	// resolutionBlob...
+	resolutionBlob fn.Option[tlv.Blob]
 }
 
 // defaultInputOpts...
@@ -171,6 +184,13 @@ func defaultInputOpts() *inputOpts {
 
 // InputOpt...
 type InputOpt func(*inputOpts)
+
+// WithResolutionBlob...
+func WithResolutionBlob(b fn.Option[tlv.Blob]) InputOpt {
+	return func(o *inputOpts) {
+		o.resolutionBlob = b
+	}
+}
 
 // BaseInput contains all the information needed to sweep a basic
 // output (CSV/CLTV/no time lock).
