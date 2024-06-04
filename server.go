@@ -4760,21 +4760,34 @@ func (s *server) SendCustomMessage(peerPub [33]byte, msgType lnwire.MessageType,
 
 // newSweepPkScriptGen creates closure that generates a new public key script
 // which should be used to sweep any funds into the on-chain wallet.
-// Specifically, the script generated is a version 0, pay-to-witness-pubkey-hash
-// (p2wkh) output.
-func newSweepPkScriptGen(
-	wallet lnwallet.WalletController) func() ([]byte, error) {
+// Specifically, the script generated is a version 0,
+// pay-to-witness-pubkey-hash (p2wkh) output.
+func newSweepPkScriptGen(wallet lnwallet.WalletController,
+) func() fn.Result[lnwallet.AddrWithKey] {
 
-	return func() ([]byte, error) {
+	return func() fn.Result[lnwallet.AddrWithKey] {
 		sweepAddr, err := wallet.NewAddress(
 			lnwallet.TaprootPubkey, false,
 			lnwallet.DefaultAccountName,
 		)
 		if err != nil {
-			return nil, err
+			return fn.Err[lnwallet.AddrWithKey](err)
 		}
 
-		return txscript.PayToAddrScript(sweepAddr)
+		addr, err := txscript.PayToAddrScript(sweepAddr)
+		if err != nil {
+			return fn.Err[lnwallet.AddrWithKey](err)
+		}
+
+		return fn.AndThen(
+			lnwallet.InternalKeyForAddr(wallet, addr),
+			func(pub btcec.PublicKey) fn.Result[lnwallet.AddrWithKey] { //nolint:lll
+				return fn.Ok(lnwallet.AddrWithKey{
+					DeliveryAddress: addr,
+					InternalKey:     fn.Some(pub),
+				})
+			},
+		)
 	}
 }
 
