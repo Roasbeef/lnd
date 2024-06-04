@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -18,8 +19,10 @@ import (
 	base "github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/lightningnetwork/lnd/fn"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
+	"github.com/lightningnetwork/lnd/lnwire"
 )
 
 const (
@@ -590,6 +593,50 @@ type MessageSigner interface {
 	// the single or double SHA-256 of the passed message.
 	SignMessage(keyLoc keychain.KeyLocator, msg []byte,
 		doubleHash bool) (*ecdsa.Signature, error)
+}
+
+// AddrWithKey wraps a normal addr, but also includes the internal key for the
+// delivery addr if known.
+type AddrWithKey struct {
+	lnwire.DeliveryAddress
+
+	InternalKey fn.Option[btcec.PublicKey]
+
+	// TODO(roasbeef): consolidate w/ instance in chan closer
+}
+
+// InternalKeyForAddr returns the internal key associated with a taproot
+// address.
+func InternalKeyForAddr(wallet WalletController, netParams *chaincfg.Params,
+	deliveryScript []byte) fn.Result[btcec.PublicKey] {
+
+	pkScript, err := txscript.ParsePkScript(deliveryScript)
+	if err != nil {
+		return fn.Err[btcec.PublicKey](err)
+	}
+	addr, err := pkScript.Address(netParams)
+	if err != nil {
+		return fn.Err[btcec.PublicKey](err)
+	}
+
+	walletAddr, err := wallet.AddressInfo(addr)
+	if err != nil {
+		return fn.Err[btcec.PublicKey](err)
+	}
+
+	if walletAddr.AddrType() != waddrmgr.TaprootPubKey {
+		return fn.Err[btcec.PublicKey](fmt.Errorf("expected taproot "+
+			"addr, got %v", walletAddr.AddrType()))
+	}
+
+	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return fn.Err[btcec.PublicKey](
+			fmt.Errorf("expected pubkey addr, got %T", pubKeyAddr),
+		)
+	}
+
+	return fn.Ok[btcec.PublicKey](*pubKeyAddr.PubKey())
 }
 
 // WalletDriver represents a "driver" for a particular concrete

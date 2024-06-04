@@ -18,7 +18,6 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/buffer"
 	"github.com/lightningnetwork/lnd/build"
@@ -883,49 +882,6 @@ func (p *Brontide) QuitSignal() <-chan struct{} {
 	return p.quit
 }
 
-// internalKeyForAddr returns the internal key associated with a taproot
-// address.
-func internalKeyForAddr(wallet *lnwallet.LightningWallet,
-	deliveryScript []byte) (fn.Option[btcec.PublicKey], error) {
-
-	none := fn.None[btcec.PublicKey]()
-
-	pkScript, err := txscript.ParsePkScript(deliveryScript)
-	if err != nil {
-		return none, err
-	}
-	addr, err := pkScript.Address(&wallet.Cfg.NetParams)
-	if err != nil {
-		return none, err
-	}
-
-	walletAddr, err := wallet.AddressInfo(addr)
-	if err != nil {
-		return none, err
-	}
-
-	// If the address isn't known to the wallet, we can't determine the
-	// internal key.
-	if walletAddr == nil {
-		return none, nil
-	}
-
-	// If it's not a taproot address, we don't require to know the internal
-	// key in the first place. So we don't return an error here, but also no
-	// internal key.
-	if walletAddr.AddrType() != waddrmgr.TaprootPubKey {
-		return none, nil
-	}
-
-	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return none, fmt.Errorf("expected pubkey addr, got %T",
-			pubKeyAddr)
-	}
-
-	return fn.Some(*pubKeyAddr.PubKey()), nil
-}
-
 // addrWithInternalKey takes a delivery script, then attempts to supplement it
 // with information related to the internal key for the addr, but only if it's
 // a taproot addr.
@@ -937,16 +893,17 @@ func (p *Brontide) addrWithInternalKey(
 	// shutdown addresses, so this shouldn't be an issue. We only require
 	// the internal key for taproot addresses to be able to provide a non
 	// inclusion proof of any scripts.
-
-	internalKey, err := internalKeyForAddr(p.cfg.Wallet, deliveryScript)
-	if err != nil {
-		return fn.Err[chancloser.DeliveryAddrWithKey](err)
-	}
-
-	return fn.Ok(chancloser.DeliveryAddrWithKey{
-		DeliveryAddress: deliveryScript,
-		InternalKey:     internalKey,
-	})
+	return fn.FlatMap(
+		lnwallet.InternalKeyForAddr(
+			p.cfg.Wallet, deliveryScript,
+		),
+		func(pub btcec.PublicKey) fn.Result[chancloser.DeliveryAddrWithKey] { //nolint:lll
+			return fn.Ok(chancloser.DeliveryAddrWithKey{
+				DeliveryAddress: deliveryScript,
+				InternalKey:     fn.Some(pub),
+			})
+		},
+	)
 }
 
 // loadActiveChannels creates indexes within the peer for tracking all active
@@ -1019,6 +976,8 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 				return nil, err
 			}
 		}
+
+		// TODO(roasbeef): also make aux resolver here
 
 		var chanOpts []lnwallet.ChannelOpt
 		p.cfg.AuxLeafStore.WhenSome(func(s lnwallet.AuxLeafStore) {
