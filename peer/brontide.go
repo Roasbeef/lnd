@@ -895,7 +895,8 @@ func (p *Brontide) addrWithInternalKey(
 	// inclusion proof of any scripts.
 	return fn.FlatMap(
 		lnwallet.InternalKeyForAddr(
-			p.cfg.Wallet, deliveryScript,
+			p.cfg.Wallet, &p.cfg.Wallet.Cfg.NetParams,
+			deliveryScript,
 		),
 		func(pub btcec.PublicKey) fn.Result[chancloser.DeliveryAddrWithKey] { //nolint:lll
 			return fn.Ok(chancloser.DeliveryAddrWithKey{
