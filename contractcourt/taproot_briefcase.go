@@ -30,6 +30,8 @@ type taprootBriefcase struct {
 	// revocation paths.
 	TapTweaks tlv.RecordT[tlv.TlvType1, tapTweaks]
 
+	// CommitBlob...
+	CommitBlob tlv.OptionalRecordT[tlv.TlvType2, tlv.Blob]
 }
 
 // TODO(roasbeef): morph into new tlv record
@@ -48,6 +50,11 @@ func (t *taprootBriefcase) EncodeRecords() []tlv.Record {
 	records := []tlv.Record{
 		t.CtrlBlocks.Record(), t.TapTweaks.Record(),
 	}
+
+	t.CommitBlob.WhenSome(func(r tlv.RecordT[tlv.TlvType2, tlv.Blob]) {
+		records = append(records, r.Record())
+	})
+
 	return records
 }
 
@@ -71,6 +78,7 @@ func (t *taprootBriefcase) Encode(w io.Writer) error {
 
 // Decode decodes the given reader into the target struct.
 func (t *taprootBriefcase) Decode(r io.Reader) error {
+	commitBlob := t.CommitBlob.Zero()
 	records := append(t.DecodeRecords(), commitBlob.Record())
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -82,6 +90,9 @@ func (t *taprootBriefcase) Decode(r io.Reader) error {
 		return err
 	}
 
+	if val, ok := typeMap[t.CommitBlob.TlvType()]; ok && val == nil {
+		t.CommitBlob = tlv.SomeRecordT(commitBlob)
+	}
 
 	return nil
 }
