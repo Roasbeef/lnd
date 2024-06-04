@@ -111,7 +111,7 @@ type BumpRequest struct {
 	DeadlineHeight int32
 
 	// DeliveryAddress is the script to send the change output to.
-	DeliveryAddress []byte
+	DeliveryAddress lnwallet.AddrWithKey
 
 	// MaxFeeRate is the maximum fee rate that can be used for fee bumping.
 	MaxFeeRate chainfee.SatPerKWeight
@@ -132,7 +132,11 @@ type BumpRequest struct {
 func (r *BumpRequest) MaxFeeRateAllowed() (chainfee.SatPerKWeight, error) {
 	// Get the size of the sweep tx, which will be used to calculate the
 	// budget fee rate.
-	size, err := calcSweepTxWeight(r.Inputs, r.DeliveryAddress)
+	//
+	// TODO(roasbeef): also wants the extra change output?
+	size, err := calcSweepTxWeight(
+		r.Inputs, r.DeliveryAddress.DeliveryAddress,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -174,7 +178,7 @@ func calcSweepTxWeight(inputs []input.Input,
 	// TODO(yy): we should refactor the weight estimator to not require a
 	// fee rate and max fee rate and make it a pure tx weight calculator.
 	_, estimator, err := getWeightEstimate(
-		inputs, nil, feeRate, 0, outputPkScript,
+		inputs, nil, feeRate, 0, [][]byte{outputPkScript},
 	)
 	if err != nil {
 		return 0, err
@@ -253,6 +257,9 @@ type TxPublisherConfig struct {
 
 	// Notifier is used to monitor the confirmation status of the tx.
 	Notifier chainntnfs.ChainNotifier
+
+	// AuxSweeper...
+	AuxSweeper fn.Option[AuxSweeper]
 }
 
 // TxPublisher is an implementation of the Bumper interface. It utilizes the
@@ -1156,8 +1163,9 @@ func (t *TxPublisher) createSweepTx(inputs []input.Input,
 	feeRate chainfee.SatPerKWeight) (*sweepTxCtx, error) {
 
 	// Validate and calculate the fee and change amount.
-	txFee, changeAmtOpt, locktimeOpt, err := prepareSweepTx(
+	txFee, changeOutputsOpt, locktimeOpt, err := prepareSweepTx(
 		inputs, changePkScript, feeRate, t.currentHeight.Load(),
+		t.cfg.AuxSweeper,
 	)
 	if err != nil {
 		return nil, err
@@ -1280,11 +1288,12 @@ func (t *TxPublisher) createSweepTx(inputs []input.Input,
 // 3. check the inputs cover the outputs.
 //
 // NOTE: if the change amount is below dust, it will be added to the tx fee.
-func prepareSweepTx(inputs []input.Input, changePkScript []byte,
-	feeRate chainfee.SatPerKWeight, currentHeight int32) (
-	btcutil.Amount, fn.Option[btcutil.Amount], fn.Option[int32], error) {
+func prepareSweepTx(inputs []input.Input, changePkScript lnwallet.AddrWithKey,
+	feeRate chainfee.SatPerKWeight, currentHeight int32,
+	auxSweeper fn.Option[AuxSweeper]) (
+	btcutil.Amount, fn.Option[[]SweepOutput], fn.Option[int32], error) {
 
-	noChange := fn.None[btcutil.Amount]()
+	noChange := fn.None[[]SweepOutput]()
 	noLocktime := fn.None[int32]()
 
 	// Given the set of inputs we have, if we have an aux sweeper, then
@@ -1308,7 +1317,7 @@ func prepareSweepTx(inputs []input.Input, changePkScript []byte,
 	// We don't allow adding customized outputs in the sweeping tx, and the
 	// fee rate is already being managed before we get here.
 	inputs, estimator, err := getWeightEstimate(
-		inputs, nil, feeRate, 0, changePkScript,
+		inputs, nil, feeRate, 0, changePkScripts,
 	)
 	if err != nil {
 		return 0, noChange, noLocktime, err
@@ -1387,10 +1396,14 @@ func prepareSweepTx(inputs []input.Input, changePkScript []byte,
 
 	// We'll calculate the dust limit for the given changePkScript since it
 	// is variable.
-	changeFloor := lnwallet.DustLimitForSize(len(changePkScript))
+	changeFloor := lnwallet.DustLimitForSize(
+		len(changePkScript.DeliveryAddress),
+	)
 
-	// If the change amount is dust, we'll move it into the fees.
-	if changeAmt < changeFloor {
+	switch {
+	// If the change amount is dust, we'll move it into the fees, and
+	// ignore it.
+	case changeAmt < changeFloor:
 		log.Infof("Change amt %v below dustlimit %v, not adding "+
 			"change output", changeAmt, changeFloor)
 
@@ -1423,6 +1436,11 @@ func prepareSweepTx(inputs []input.Input, changePkScript []byte,
 		locktimeOpt = noLocktime
 	}
 
+	var changeOutsOpt fn.Option[[]SweepOutput]
+	if len(changeOuts) > 0 {
+		changeOutsOpt = fn.Some(changeOuts)
+	}
+
 	log.Debugf("Creating sweep tx for %v inputs (%s) using %v, "+
 		"tx_weight=%v, tx_fee=%v, locktime=%v, parents_count=%v, "+
 		"parents_fee=%v, parents_weight=%v, current_height=%v",
@@ -1430,5 +1448,5 @@ func prepareSweepTx(inputs []input.Input, changePkScript []byte,
 		estimator.weight(), txFee, locktimeOpt, len(estimator.parents),
 		estimator.parentsFee, estimator.parentsWeight, currentHeight)
 
-	return txFee, changeAmtOpt, locktimeOpt, nil
+	return txFee, changeOutsOpt, locktimeOpt, nil
 }
