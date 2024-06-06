@@ -154,3 +154,15 @@ func FlatMap[A, B any](r Result[A], f func(A) Result[B]) Result[B] {
 func AndThen[A, B any](r Result[A], f func(A) Result[B]) Result[B] {
 	return FlatMap(r, f)
 }
+
+// AndThen2 applies a function that returns a Result[C] to the success values
+// of two Result types if both exist.
+func AndThen2[A, B, C any](ra Result[A], rb Result[B],
+	f func(A, B) Result[C]) Result[C] {
+
+	return AndThen(ra, func(a A) Result[C] {
+		return AndThen(rb, func(b B) Result[C] {
+			return f(a, b)
+		})
+	})
+}
