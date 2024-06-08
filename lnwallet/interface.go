@@ -608,35 +608,43 @@ type AddrWithKey struct {
 // InternalKeyForAddr returns the internal key associated with a taproot
 // address.
 func InternalKeyForAddr(wallet WalletController, netParams *chaincfg.Params,
-	deliveryScript []byte) fn.Result[btcec.PublicKey] {
+	deliveryScript []byte) fn.Result[keychain.KeyDescriptor] {
 
 	pkScript, err := txscript.ParsePkScript(deliveryScript)
 	if err != nil {
-		return fn.Err[btcec.PublicKey](err)
+		return fn.Err[keychain.KeyDescriptor](err)
 	}
 	addr, err := pkScript.Address(netParams)
 	if err != nil {
-		return fn.Err[btcec.PublicKey](err)
+		return fn.Err[keychain.KeyDescriptor](err)
 	}
 
 	walletAddr, err := wallet.AddressInfo(addr)
 	if err != nil {
-		return fn.Err[btcec.PublicKey](err)
+		return fn.Err[keychain.KeyDescriptor](err)
 	}
 
 	if walletAddr.AddrType() != waddrmgr.TaprootPubKey {
-		return fn.Err[btcec.PublicKey](fmt.Errorf("expected taproot "+
+		return fn.Err[keychain.KeyDescriptor](fmt.Errorf("expected taproot "+
 			"addr, got %v", walletAddr.AddrType()))
 	}
 
 	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return fn.Err[btcec.PublicKey](
+		return fn.Err[keychain.KeyDescriptor](
 			fmt.Errorf("expected pubkey addr, got %T", pubKeyAddr),
 		)
 	}
 
-	return fn.Ok[btcec.PublicKey](*pubKeyAddr.PubKey())
+	_, derivationPath, _ := pubKeyAddr.DerivationInfo()
+
+	return fn.Ok[keychain.KeyDescriptor](keychain.KeyDescriptor{
+		KeyLocator: keychain.KeyLocator{
+			Family: keychain.KeyFamily(derivationPath.Account),
+			Index:  derivationPath.Index,
+		},
+		PubKey: pubKeyAddr.PubKey(),
+	})
 }
 
 // WalletDriver represents a "driver" for a particular concrete

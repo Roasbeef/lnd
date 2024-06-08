@@ -35,6 +35,7 @@ import (
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnpeer"
 	"github.com/lightningnetwork/lnd/lnutils"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -898,10 +899,10 @@ func (p *Brontide) addrWithInternalKey(
 			p.cfg.Wallet, &p.cfg.Wallet.Cfg.NetParams,
 			deliveryScript,
 		),
-		func(pub btcec.PublicKey) fn.Result[chancloser.DeliveryAddrWithKey] { //nolint:lll
+		func(keyDesc keychain.KeyDescriptor) fn.Result[chancloser.DeliveryAddrWithKey] { //nolint:lll
 			return fn.Ok(chancloser.DeliveryAddrWithKey{
 				DeliveryAddress: deliveryScript,
-				InternalKey:     fn.Some(pub),
+				InternalKey:     fn.Some(*keyDesc.PubKey),
 			})
 		},
 	)

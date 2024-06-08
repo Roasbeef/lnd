@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/txscript"
@@ -514,12 +515,14 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	var serializedPubKey [33]byte
 	copy(serializedPubKey[:], nodeKeyDesc.PubKey.SerializeCompressed())
 
+	netParams := cfg.ActiveNetParams.Params
+
 	// Initialize the sphinx router.
 	replayLog := htlcswitch.NewDecayedLog(
 		dbs.DecayedLogDB, cc.ChainNotifier,
 	)
 	sphinxRouter := sphinx.NewRouter(
-		nodeKeyECDH, cfg.ActiveNetParams.Params, replayLog,
+		nodeKeyECDH, netParams, replayLog,
 	)
 
 	writeBufferPool := pool.NewWriteBuffer(
@@ -1098,8 +1101,10 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	})
 
 	s.sweeper = sweep.New(&sweep.UtxoSweeperConfig{
-		FeeEstimator:         cc.FeeEstimator,
-		GenSweepScript:       newSweepPkScriptGen(cc.Wallet),
+		FeeEstimator: cc.FeeEstimator,
+		GenSweepScript: newSweepPkScriptGen(
+			cc.Wallet, s.cfg.ActiveNetParams.Params,
+		),
 		Signer:               cc.Wallet.Cfg.Signer,
 		Wallet:               newSweeperWallet(cc.Wallet),
 		Mempool:              cc.MempoolNotifier,
@@ -1142,10 +1147,20 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 	s.breachArbitrator = contractcourt.NewBreachArbitrator(
 		&contractcourt.BreachConfig{
-			CloseLink:          closeLink,
-			DB:                 s.chanStateDB,
-			Estimator:          s.cc.FeeEstimator,
-			GenSweepScript:     newSweepPkScriptGen(cc.Wallet),
+			CloseLink: closeLink,
+			DB:        s.chanStateDB,
+			Estimator: s.cc.FeeEstimator,
+			// TODO(roasbeef): upgrade this
+			GenSweepScript: func() ([]byte, error) {
+				addr, err := newSweepPkScriptGen(
+					cc.Wallet, netParams,
+				)().Unpack()
+				if err != nil {
+					return nil, err
+				}
+
+				return addr.DeliveryAddress, nil
+			},
 			Notifier:           cc.ChainNotifier,
 			PublishTransaction: cc.Wallet.PublishTransaction,
 			ContractBreaches:   contractBreaches,
@@ -1161,8 +1176,17 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		ChainHash:              *s.cfg.ActiveNetParams.GenesisHash,
 		IncomingBroadcastDelta: lncfg.DefaultIncomingBroadcastDelta,
 		OutgoingBroadcastDelta: lncfg.DefaultOutgoingBroadcastDelta,
-		NewSweepAddr:           newSweepPkScriptGen(cc.Wallet),
-		PublishTx:              cc.Wallet.PublishTransaction,
+		NewSweepAddr: func() ([]byte, error) {
+			addr, err := newSweepPkScriptGen(
+				cc.Wallet, netParams,
+			)().Unpack()
+			if err != nil {
+				return nil, err
+			}
+
+			return addr.DeliveryAddress, nil
+		},
+		PublishTx: cc.Wallet.PublishTransaction,
 		DeliverResolutionMsg: func(msgs ...contractcourt.ResolutionMsg) error {
 			for _, msg := range msgs {
 				err := s.htlcSwitch.ProcessContractResolution(msg)
@@ -1604,7 +1628,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 			br, err := lnwallet.NewBreachRetribution(
 				channel, commitHeight, 0, nil,
-				implCfg.AuxLeafStore,
+				implCfg.AuxLeafStore, implCfg.AuxSweeper,
 			)
 			if err != nil {
 				return nil, 0, err
@@ -1638,8 +1662,17 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 				return s.channelNotifier.
 					SubscribeChannelEvents()
 			},
-			Signer:             cc.Wallet.Cfg.Signer,
-			NewAddress:         newSweepPkScriptGen(cc.Wallet),
+			Signer: cc.Wallet.Cfg.Signer,
+			NewAddress: func() ([]byte, error) {
+				addr, err := newSweepPkScriptGen(
+					cc.Wallet, netParams,
+				)().Unpack()
+				if err != nil {
+					return nil, err
+				}
+
+				return addr.DeliveryAddress, nil
+			},
 			SecretKeyRing:      s.cc.KeyRing,
 			Dial:               cfg.net.Dial,
 			AuthDial:           authDial,
@@ -4762,7 +4795,7 @@ func (s *server) SendCustomMessage(peerPub [33]byte, msgType lnwire.MessageType,
 // which should be used to sweep any funds into the on-chain wallet.
 // Specifically, the script generated is a version 0,
 // pay-to-witness-pubkey-hash (p2wkh) output.
-func newSweepPkScriptGen(wallet lnwallet.WalletController,
+func newSweepPkScriptGen(wallet lnwallet.WalletController, netParams *chaincfg.Params,
 ) func() fn.Result[lnwallet.AddrWithKey] {
 
 	return func() fn.Result[lnwallet.AddrWithKey] {
@@ -4780,11 +4813,11 @@ func newSweepPkScriptGen(wallet lnwallet.WalletController,
 		}
 
 		return fn.AndThen(
-			lnwallet.InternalKeyForAddr(wallet, addr),
-			func(pub btcec.PublicKey) fn.Result[lnwallet.AddrWithKey] { //nolint:lll
+			lnwallet.InternalKeyForAddr(wallet, netParams, addr),
+			func(keyDesc keychain.KeyDescriptor) fn.Result[lnwallet.AddrWithKey] { //nolint:lll
 				return fn.Ok(lnwallet.AddrWithKey{
 					DeliveryAddress: addr,
-					InternalKey:     fn.Some(pub),
+					InternalKey:     fn.Some(keyDesc),
 				})
 			},
 		)
