@@ -50,6 +50,7 @@ import (
 	"github.com/lightningnetwork/lnd/rpcperms"
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/lightningnetwork/lnd/sqldb"
+	"github.com/lightningnetwork/lnd/sweep"
 	"github.com/lightningnetwork/lnd/walletunlocker"
 	"github.com/lightningnetwork/lnd/watchtower"
 	"github.com/lightningnetwork/lnd/watchtower/wtclient"
@@ -190,7 +191,11 @@ type AuxComponents struct {
 
 	// AuxSweeper is an optional interface that can be used to modify the
 	// way sweep transaction are generated.
-	AuxSweeper fn.Option[lnwallet.AuxContractResolver]
+	AuxSweeper fn.Option[sweep.AuxSweeper]
+
+	// AuxContractResolver is an optional interface that can be used to
+	// modify the way contracts are resolved.
+	AuxContractResolver fn.Option[lnwallet.AuxContractResolver]
 }
 
 // DefaultWalletImpl is the default implementation of our normal, btcwallet

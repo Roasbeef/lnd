@@ -1094,10 +1094,11 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	)
 
 	s.txPublisher = sweep.NewTxPublisher(sweep.TxPublisherConfig{
-		Signer:    cc.Wallet.Cfg.Signer,
-		Wallet:    cc.Wallet,
-		Estimator: cc.FeeEstimator,
-		Notifier:  cc.ChainNotifier,
+		Signer:     cc.Wallet.Cfg.Signer,
+		Wallet:     cc.Wallet,
+		Estimator:  cc.FeeEstimator,
+		Notifier:   cc.ChainNotifier,
+		AuxSweeper: s.implCfg.AuxSweeper,
 	})
 
 	s.sweeper = sweep.New(&sweep.UtxoSweeperConfig{
@@ -1115,6 +1116,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		Aggregator:           aggregator,
 		Publisher:            s.txPublisher,
 		NoDeadlineConfTarget: cfg.Sweeper.NoDeadlineConfTarget,
+		AuxSweeper:           s.implCfg.AuxSweeper,
 	})
 
 	s.utxoNursery = contractcourt.NewUtxoNursery(&contractcourt.NurseryConfig{
@@ -1293,6 +1295,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		},
 		AuxLeafStore: implCfg.AuxLeafStore,
 		AuxSigner:    implCfg.AuxSigner,
+		AuxResolver:  implCfg.AuxContractResolver,
 	}, dbs.ChanStateDB)
 
 	// Select the configuration and funding parameters for Bitcoin.
@@ -1541,6 +1544,8 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		AliasManager:         s.aliasMgr,
 		IsSweeperOutpoint:    s.sweeper.IsSweeperOutpoint,
 		AuxFundingController: implCfg.AuxFundingController,
+		AuxSigner:            implCfg.AuxSigner,
+		AuxResolver:          implCfg.AuxContractResolver,
 	})
 	if err != nil {
 		return nil, err
@@ -1628,7 +1633,8 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 			br, err := lnwallet.NewBreachRetribution(
 				channel, commitHeight, 0, nil,
-				implCfg.AuxLeafStore, implCfg.AuxSweeper,
+				implCfg.AuxLeafStore,
+				implCfg.AuxContractResolver,
 			)
 			if err != nil {
 				return nil, 0, err
@@ -3976,6 +3982,7 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		AuxSigner:              s.implCfg.AuxSigner,
 		MsgRouter:              s.implCfg.MsgRouter,
 		AuxChanCloser:          s.implCfg.AuxChanCloser,
+		AuxResolver:            s.implCfg.AuxContractResolver,
 	}
 
 	copy(pCfg.PubKeyBytes[:], peerAddr.IdentityKey.SerializeCompressed())
