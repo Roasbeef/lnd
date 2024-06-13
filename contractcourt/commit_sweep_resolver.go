@@ -261,9 +261,7 @@ func (c *commitSweepResolver) Resolve(_ bool) (ContractResolver, error) {
 	//  * otherwise need to base off the key in script or the CSV value
 	//  (script num encode)
 	case c.chanType.IsTaproot():
-		scriptLen := len(signDesc.WitnessScript)
-		isLocalCommitTx = signDesc.WitnessScript[scriptLen-1] ==
-			txscript.OP_DROP
+		isLocalCommitTx = c.commitResolution.MaturityDelay != 1
 
 	// The output is on our local commitment if the script starts with
 	// OP_IF for the revocation clause. On the remote commitment it will
@@ -272,6 +270,9 @@ func (c *commitSweepResolver) Resolve(_ bool) (ContractResolver, error) {
 		isLocalCommitTx = signDesc.WitnessScript[0] == txscript.OP_IF
 	}
 	isDelayedOutput := c.commitResolution.MaturityDelay != 0
+
+	c.log.Debugf("taproot_chan=%v, isLocalCommitTx=%v", c.chanType.IsTaproot(),
+		isLocalCommitTx)
 
 	c.log.Debugf("isDelayedOutput=%v, isLocalCommitTx=%v", isDelayedOutput,
 		isLocalCommitTx)
