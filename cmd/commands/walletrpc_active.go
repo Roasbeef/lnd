@@ -532,7 +532,7 @@ func bumpForceCloseFee(ctx *cli.Context) error {
 
 	for _, sweep := range sweeps.PendingSweeps {
 		// Only bump anchor sweeps.
-		if sweep.WitnessType != walletrpc.WitnessType_COMMITMENT_ANCHOR {
+		if sweep.WitnessType != walletrpc.WitnessType_COMMITMENT_ANCHOR { //nolint:lll
 			continue
 		}
 
