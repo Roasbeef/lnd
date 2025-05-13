@@ -2630,12 +2630,21 @@ func (p *Brontide) writeMessage(msg lnwire.Message) error {
 // NOTE: This method MUST be run as a goroutine.
 func (p *Brontide) writeHandler() {
 	// We'll stop the timer after a new messages is sent, and also reset it
-	// after we process the next message.
-	idleTimer := time.AfterFunc(idleTimeout, func() {
-		err := fmt.Errorf("peer %s no write for %s -- disconnecting",
-			p, idleTimeout)
-		p.Disconnect(err)
-	})
+	// after we process the next message or a successful health check.
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
+	// resetIdleTimer stops, drains (if necessary), and resets the
+	// idleTimer.
+	resetIdleTimer := func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+	}
 
 	var exitErr error
 
@@ -2673,13 +2682,7 @@ out:
 
 			// The write succeeded, reset the idle timer to prevent
 			// us from disconnecting the peer.
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(idleTimeout)
+			resetIdleTimer()
 
 			// If the peer requested a synchronous write, respond
 			// with the error.
@@ -2690,6 +2693,38 @@ out:
 			if err != nil {
 				exitErr = fmt.Errorf("unable to write "+
 					"message: %v", err)
+				break out
+			}
+
+		// Write idle timeout detected. Instead of disconnecting
+		// immediately, try to ensure a ping is active or initiated.
+		case <-idleTimer.C:
+			p.log.Warnf("Write idle timeout for hit, " +
+				"performing health check...")
+
+			err := p.pingManager.InitiateHealthCheckPing()
+			switch {
+			// Ping was newly initiated. Reset idle timer. Outcome
+			// will be handled by pingManager.
+			case err == nil:
+				p.log.Infof("Ping initiated by writeHandler, " +
+					"resetting write idle timer")
+
+				resetIdleTimer()
+
+			// A ping is already in flight. This is fine. Reset idle
+			// timer.
+			case errors.Is(err, ErrPingAlreadyInProgress):
+				p.log.Infof("Ping already in progress, " +
+					"resetting write idle timer")
+
+				resetIdleTimer()
+
+			// If we couldn't ping at all, then we'll exit.
+			default:
+				exitErr = fmt.Errorf("peer %s: failed to "+
+					"ensure ping after write idle timeout: "+
+					"%v -- disconnecting", p, err)
 				break out
 			}
 

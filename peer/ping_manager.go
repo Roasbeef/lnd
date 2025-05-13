@@ -10,6 +10,10 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
+// ErrPingAlreadyInProgress is returned when a ping is already outstanding and
+// a new one cannot be sent at this moment.
+var ErrPingAlreadyInProgress = errors.New("ping already in progress")
+
 // PingManagerConfig is a structure containing various parameters that govern
 // how the PingManager behaves.
 type PingManagerConfig struct {
@@ -113,6 +117,30 @@ func (m *PingManager) ResetPingTicker() {
 	m.pingTicker.Reset(m.cfg.IntervalDuration)
 }
 
+// sendPing tries to send a ping if one isn't already outstanding. If a ping is
+// already in process, ErrPingAlreadyInProgress is returned.
+func (m *PingManager) sendPing() error {
+	// If this occurs it means that the new ping cycle has begun while there
+	// is still an outstanding ping awaiting a pong response.  This should
+	// never occur, but if it does, it implies a timeout.
+	if atomic.LoadInt32(&m.outstandingPongSize) >= 0 {
+		return ErrPingAlreadyInProgress
+	}
+
+	pongSize := m.cfg.NewPongSize()
+	ping := &lnwire.Ping{
+		NumPongBytes: pongSize,
+		PaddingBytes: m.cfg.NewPingPayload(),
+	}
+
+	if err := m.setPingState(pongSize); err != nil {
+		return fmt.Errorf("failed to set ping state: %w", err)
+	}
+
+	m.cfg.SendPing(ping)
+	return nil
+}
+
 // pingHandler is the main goroutine responsible for enforcing the ping/pong
 // protocol.
 func (m *PingManager) pingHandler() {
@@ -127,11 +155,7 @@ func (m *PingManager) pingHandler() {
 	for {
 		select {
 		case <-m.pingTicker.C:
-			// If this occurs it means that the new ping cycle has
-			// begun while there is still an outstanding ping
-			// awaiting a pong response.  This should never occur,
-			// but if it does, it implies a timeout.
-			if m.outstandingPongSize >= 0 {
+			if err := m.sendPing(); err != nil {
 				e := errors.New("impossible: new ping" +
 					"in unclean state",
 				)
@@ -140,48 +164,32 @@ func (m *PingManager) pingHandler() {
 				return
 			}
 
-			pongSize := m.cfg.NewPongSize()
-			ping := &lnwire.Ping{
-				NumPongBytes: pongSize,
-				PaddingBytes: m.cfg.NewPingPayload(),
-			}
-
-			// Set up our bookkeeping for the new Ping.
-			if err := m.setPingState(pongSize); err != nil {
-				m.cfg.OnPongFailure(err)
-
-				return
-			}
-
-			m.cfg.SendPing(ping)
-
 		case <-m.pingTimeout.C:
 			m.resetPingState()
 
-			e := errors.New("timeout while waiting for " +
+			timeoutErr := errors.New("timeout while waiting for " +
 				"pong response",
 			)
 
-			m.cfg.OnPongFailure(e)
+			m.cfg.OnPongFailure(timeoutErr)
 
 			return
 
 		case pong := <-m.pongChan:
 			pongSize := int32(len(pong.PongBytes))
 
-			// Save off values we are about to override when we
-			// call resetPingState.
-			expected := m.outstandingPongSize
-			lastPing := m.pingLastSend
+			// Save off values we are about to override when we call
+			// resetPingState.
+			expectedPongSize := atomic.LoadInt32(&m.outstandingPongSize)
+			pingSendTime := m.pingLastSend
 
 			m.resetPingState()
 
 			// If the pong we receive doesn't match the ping we
 			// sent out, then we fail out.
-			if pongSize != expected {
+			if pongSize != expectedPongSize {
 				e := errors.New("pong response does " +
-					"not match expected size",
-				)
+					"not match expected size")
 
 				m.cfg.OnPongFailure(e)
 
@@ -190,8 +198,8 @@ func (m *PingManager) pingHandler() {
 
 			// Compute RTT of ping and save that for future
 			// querying.
-			if lastPing != nil {
-				rtt := time.Since(*lastPing)
+			if pingSendTime != nil {
+				rtt := time.Since(*pingSendTime)
 				m.pingTime.Store(&rtt)
 			}
 
@@ -221,7 +229,9 @@ func (m *PingManager) Stop() {
 func (m *PingManager) setPingState(pongSize uint16) error {
 	t := time.Now()
 	m.pingLastSend = &t
-	m.outstandingPongSize = int32(pongSize)
+
+	atomic.StoreInt32(&m.outstandingPongSize, int32(pongSize))
+
 	if m.pingTimeout.Reset(m.cfg.TimeoutDuration) {
 		return fmt.Errorf(
 			"impossible: ping timeout reset when already active",
@@ -235,7 +245,9 @@ func (m *PingManager) setPingState(pongSize uint16) error {
 // is tracking a currently outstanding Ping.
 func (m *PingManager) resetPingState() {
 	m.pingLastSend = nil
-	m.outstandingPongSize = -1
+
+	atomic.StoreInt32(&m.outstandingPongSize, -1)
+
 	if !m.pingTimeout.Stop() {
 		select {
 		case <-m.pingTimeout.C:
@@ -263,4 +275,13 @@ func (m *PingManager) ReceivedPong(msg *lnwire.Pong) {
 	case m.pongChan <- msg:
 	case <-m.quit:
 	}
+}
+
+// InitiateHealthCheckPing attempts to send a ping to the peer for health
+// checking purposes. It returns nil if the ping was successfully initiated, or
+// an error if a ping is already outstanding or if another critical error
+// occurred during initiation. This method does not block waiting for the pong.
+// Failures (timeout/mismatch) will be handled by cfg.OnPongFailure.
+func (m *PingManager) InitiateHealthCheckPing() error {
+	return m.sendPing()
 }
