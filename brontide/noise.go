@@ -799,8 +799,10 @@ func (b *Machine) WriteMessage(p []byte) error {
 	// to dynamic allocation for backward compatibility.
 	if b.bufferPool != nil {
 		// Get a buffer from the pool and encrypt into it.
+		// Pass a zero-length slice with full capacity so Seal can append.
 		b.bodyBuffer = b.bufferPool.Take()
-		b.nextBodySend = b.sendCipher.Encrypt(nil, b.bodyBuffer[:0], p)
+		bufCap := cap(b.bodyBuffer[:])
+		b.nextBodySend = b.sendCipher.Encrypt(nil, b.bodyBuffer[:0:bufCap], p)
 	} else {
 		// Fall back to dynamic allocation if no pool is available.
 		b.nextBodySend = b.sendCipher.Encrypt(nil, nil, p)
