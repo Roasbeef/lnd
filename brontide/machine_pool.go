@@ -69,9 +69,11 @@ func (m *Machine) Reset() {
 		m.pktLenBuffer[i] = 0
 	}
 
-	// Reset the buffer slices.
-	m.nextHeaderSend = nil
-	m.nextBodySend = nil
+	// CRITICAL: Reset the buffer slices to empty slices, not nil.
+	// Setting to nil can cause "slice bounds out of range" panics
+	// when the Machine is reused and Flush() tries to slice them.
+	m.nextHeaderSend = m.nextHeaderBuffer[:0]
+	m.nextBodySend = m.nextBodyBuffer[:0]
 
 	// Note: We don't need to zero nextBodyBuffer as it's always
 	// overwritten before use and doesn't contain key material.
