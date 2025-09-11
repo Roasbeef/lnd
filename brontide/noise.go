@@ -905,6 +905,19 @@ func (b *Machine) ReadMessage(r io.Reader) ([]byte, error) {
 	return b.ReadBody(r, buf)
 }
 
+// ReturnBuffer safely returns any held buffer to the pool. This is called
+// when the connection is closed to ensure buffers aren't leaked. It's safe
+// to call this multiple times or call Flush after this.
+func (b *Machine) ReturnBuffer() {
+	// Return buffer if we have one and it's from the pool.
+	if b.bodyBuffer != nil && b.bufferPool != nil {
+		b.bufferPool.Return(b.bodyBuffer)
+		b.bodyBuffer = nil
+		// Clear the slice reference as well to avoid use-after-return.
+		b.nextBodySend = nil
+	}
+}
+
 // ReadHeader attempts to read the next message header from the passed
 // io.Reader. The header contains the length of the next body including
 // additional overhead of the MAC. In the case of an authentication error, a

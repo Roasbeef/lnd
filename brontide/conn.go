@@ -271,9 +271,13 @@ func (c *Conn) Close() error {
 		return ErrConnClosed
 	}
 
-	// With the buffer pool approach, we don't need to clear the noise object.
-	// The expensive buffers are returned to the pool during normal operation,
-	// and the small Machine struct will be garbage collected normally.
+	// Return any held buffer to the pool. This ensures that if a connection
+	// closes after WriteMessage but before Flush, we don't leak the buffer.
+	if c.noise != nil {
+		c.noise.ReturnBuffer()
+	}
+
+	// Clear the read buffer.
 	c.readBuf = bytes.Buffer{}
 
 	return c.conn.Close()
