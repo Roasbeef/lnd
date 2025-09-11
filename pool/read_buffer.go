@@ -32,6 +32,7 @@ func NewReadBuffer(gcInterval, expiryInterval time.Duration) *ReadBuffer {
 		pool: NewRecycle(
 			func() interface{} { return new(buffer.Read) },
 			100, gcInterval, expiryInterval,
+			100*time.Millisecond, // Short timeout for read buffers
 		),
 	}
 }

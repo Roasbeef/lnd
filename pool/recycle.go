@@ -22,12 +22,12 @@ type Recycle struct {
 
 // NewRecycle initializes a fresh Recycle instance.
 func NewRecycle(newItem func() interface{}, returnQueueSize int,
-	gcInterval, expiryInterval time.Duration) *Recycle {
+	gcInterval, expiryInterval, takeTimeout time.Duration) *Recycle {
 
 	return &Recycle{
 		queue: queue.NewGCQueue(
 			newItem, returnQueueSize,
-			gcInterval, expiryInterval,
+			gcInterval, expiryInterval, takeTimeout,
 		),
 	}
 }

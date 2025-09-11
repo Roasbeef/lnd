@@ -608,9 +608,13 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 	)
 	sphinxRouter := sphinx.NewRouter(nodeKeyECDH, replayLog)
 
+	// Set the return queue size to 2x the number of restricted slots to
+	// handle burst returns efficiently when connections close.
 	writeBufferPool := pool.NewWriteBuffer(
+		int(cfg.NumRestrictedSlots)*2,
 		pool.DefaultWriteBufferGCInterval,
 		pool.DefaultWriteBufferExpiryInterval,
+		pool.DefaultWriteBufferTimeout,
 	)
 
 	writePool := pool.NewWrite(

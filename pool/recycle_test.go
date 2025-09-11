@@ -71,7 +71,8 @@ func TestConcreteRecyclePoolTests(t *testing.T) {
 			name: "write buffer pool",
 			newPool: func() interface{} {
 				return pool.NewWriteBuffer(
-					gcInterval, expiryInterval,
+					100, gcInterval, expiryInterval,
+					pool.DefaultWriteBufferTimeout,
 				)
 			},
 		},

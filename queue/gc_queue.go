@@ -34,6 +34,10 @@ type GCQueue struct {
 	// in the queue before being released.
 	expiryInterval time.Duration
 
+	// takeTimeout is the maximum amount of time Take() will wait for an
+	// item before falling back to creating a new one (if enabled).
+	takeTimeout time.Duration
+
 	// recycleTicker is a resumable ticker used to trigger a sweep to
 	// release elements that have been in the queue longer than
 	// expiryInterval.
@@ -57,14 +61,17 @@ type GCQueue struct {
 // ensure that the GCQueue becomes quiescent, and imposes minimal overhead in
 // the steady state. The returnQueueSize parameter is used to size the maximal
 // number of items that can be returned without being dropped during large
-// bursts in attempts to return items to the GCQUeue.
+// bursts in attempts to return items to the GCQUeue. The takeTimeout parameter
+// controls how long Take() will wait before creating a new item (if newItem is
+// provided). Set to a very high value to effectively wait forever.
 func NewGCQueue(newItem func() interface{}, returnQueueSize int,
-	gcInterval, expiryInterval time.Duration) *GCQueue {
+	gcInterval, expiryInterval, takeTimeout time.Duration) *GCQueue {
 
 	q := &GCQueue{
 		takeBuffer:     make(chan interface{}),
 		returnBuffer:   make(chan interface{}, returnQueueSize),
 		expiryInterval: expiryInterval,
+		takeTimeout:    takeTimeout,
 		freeList:       list.New(),
 		recycleTicker:  ticker.New(gcInterval),
 		newItem:        newItem,
@@ -77,12 +84,12 @@ func NewGCQueue(newItem func() interface{}, returnQueueSize int,
 }
 
 // Take returns either a recycled element from the queue, or creates a new item
-// if none are available.
+// if none are available after waiting for takeTimeout.
 func (q *GCQueue) Take() interface{} {
 	select {
 	case item := <-q.takeBuffer:
 		return item
-	case <-time.After(time.Millisecond):
+	case <-time.After(q.takeTimeout):
 		return q.newItem()
 	}
 }

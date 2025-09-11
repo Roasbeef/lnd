@@ -17,6 +17,11 @@ const (
 	// maximum time before the buffer can be released is equal to the expiry
 	// interval plus the gc interval.
 	DefaultWriteBufferExpiryInterval = 30 * time.Second
+
+	// DefaultWriteBufferTimeout is the default amount of time Take() will
+	// wait for a buffer to become available before creating a new one.
+	// Set to a very high value to effectively wait forever.
+	DefaultWriteBufferTimeout = 24 * time.Hour
 )
 
 // WriteBuffer is a pool of recycled buffer.Write items, that dynamically
@@ -26,12 +31,16 @@ type WriteBuffer struct {
 }
 
 // NewWriteBuffer returns a freshly instantiated WriteBuffer, using the given
-// gcInterval and expiryIntervals.
-func NewWriteBuffer(gcInterval, expiryInterval time.Duration) *WriteBuffer {
+// returnQueueSize, gcInterval, expiryInterval and takeTimeout. The returnQueueSize
+// should typically be 2x the number of restricted slots to handle burst returns.
+// The takeTimeout controls how long Take() will wait before creating a new buffer.
+func NewWriteBuffer(returnQueueSize int, gcInterval, expiryInterval,
+	takeTimeout time.Duration) *WriteBuffer {
+
 	return &WriteBuffer{
 		pool: NewRecycle(
 			func() interface{} { return new(buffer.Write) },
-			100, gcInterval, expiryInterval,
+			returnQueueSize, gcInterval, expiryInterval, takeTimeout,
 		),
 	}
 }

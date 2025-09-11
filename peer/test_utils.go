@@ -668,8 +668,10 @@ func createTestPeer(t *testing.T) *peerTestCtx {
 	})
 
 	writeBufferPool := pool.NewWriteBuffer(
+		100, // Default test queue size
 		pool.DefaultWriteBufferGCInterval,
 		pool.DefaultWriteBufferExpiryInterval,
+		pool.DefaultWriteBufferTimeout,
 	)
 
 	writePool := pool.NewWrite(

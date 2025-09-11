@@ -23,7 +23,7 @@ func TestGCQueueGCCycle(t *testing.T) {
 
 	newItem := func() interface{} { return new(testItem) }
 
-	bp := queue.NewGCQueue(newItem, 100, gcInterval, expiryInterval)
+	bp := queue.NewGCQueue(newItem, 100, gcInterval, expiryInterval, time.Millisecond)
 
 	// Take numItems items from the queue, and immediately return them.
 	// Returning the items will trigger the gc ticker to start.
@@ -61,7 +61,7 @@ func TestGCQueuePartialGCCycle(t *testing.T) {
 
 	newItem := func() interface{} { return new(testItem) }
 
-	bp := queue.NewGCQueue(newItem, 100, gcInterval, expiryInterval)
+	bp := queue.NewGCQueue(newItem, 100, gcInterval, expiryInterval, time.Millisecond)
 
 	// Take numItems items from the gc queue.
 	itemSet1 := takeN(t, bp, numItems)

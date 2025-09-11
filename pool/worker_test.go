@@ -36,7 +36,8 @@ func TestConcreteWorkerPools(t *testing.T) {
 			name: "write pool",
 			newPool: func() interface{} {
 				bp := pool.NewWriteBuffer(
-					gcInterval, expiryInterval,
+					100, gcInterval, expiryInterval,
+					pool.DefaultWriteBufferTimeout,
 				)
 
 				return pool.NewWrite(
