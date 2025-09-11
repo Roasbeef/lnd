@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/lightningnetwork/lnd/buffer"
 	"github.com/lightningnetwork/lnd/keychain"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -372,6 +373,14 @@ func EphemeralGenerator(gen func() (*btcec.PrivateKey, error)) func(*Machine) {
 //	-> e, es
 //	<- e, ee
 //	-> s, se
+// BufferPool defines the interface for getting and returning large buffers
+// used for message encryption. This allows the Machine to use buffer pools
+// while remaining testable with mock implementations.
+type BufferPool interface {
+	Take() *buffer.Write
+	Return(*buffer.Write)
+}
+
 type Machine struct {
 	sendCipher cipherState
 	recvCipher cipherState
@@ -388,9 +397,6 @@ type Machine struct {
 	// nextHeaderBuffer is a static buffer for the encrypted header.
 	nextHeaderBuffer [encHeaderSize]byte
 
-	// nextBodyBuffer is a static buffer for the encrypted body.
-	nextBodyBuffer [maxMessageSize]byte
-
 	// pktLenBuffer is a reusable buffer for encoding the packet length.
 	pktLenBuffer [lengthHeaderSize]byte
 
@@ -401,8 +407,17 @@ type Machine struct {
 
 	// nextBodySend holds a reference to the remaining body bytes to write
 	// out for a pending message. This allows us to tolerate timeout errors
-	// that cause partial writes. This slices into nextBodyBuffer.
+	// that cause partial writes. This buffer comes from the buffer pool
+	// and must be returned when flushed.
 	nextBodySend []byte
+
+	// bodyBuffer is the current buffer from the pool used for nextBodySend.
+	// We store the actual *buffer.Write so we can return it to the pool.
+	bodyBuffer *buffer.Write
+
+	// bufferPool is used to get and return large buffers for message encryption.
+	// If nil, we fall back to dynamic allocation (for backward compatibility).
+	bufferPool BufferPool
 }
 
 // NewBrontideMachine creates a new instance of the brontide state-machine. If
@@ -430,6 +445,15 @@ func NewBrontideMachine(initiator bool, localKey keychain.SingleKeyECDH,
 	}
 
 	return m
+}
+
+// WithBufferPool sets the buffer pool for the Machine to use for
+// buffer allocation during WriteMessage operations. The pool must
+// implement the BufferPool interface (which *pool.Write does).
+func WithBufferPool(pool BufferPool) func(*Machine) {
+	return func(m *Machine) {
+		m.bufferPool = pool
+	}
 }
 
 const (
@@ -770,9 +794,17 @@ func (b *Machine) WriteMessage(p []byte) error {
 		nil, b.nextHeaderBuffer[:0], b.pktLenBuffer[:],
 	)
 
-	// Finally, generate the encrypted packet itself. Similarly, we slice
-	// into nextBodyBuffer to reuse the buffer.
-	b.nextBodySend = b.sendCipher.Encrypt(nil, b.nextBodyBuffer[:0], p)
+	// Finally, generate the encrypted packet itself. If we have a buffer pool,
+	// get a buffer from it for zero-allocation encryption. Otherwise fall back
+	// to dynamic allocation for backward compatibility.
+	if b.bufferPool != nil {
+		// Get a buffer from the pool and encrypt into it.
+		b.bodyBuffer = b.bufferPool.Take()
+		b.nextBodySend = b.sendCipher.Encrypt(nil, b.bodyBuffer[:0], p)
+	} else {
+		// Fall back to dynamic allocation if no pool is available.
+		b.nextBodySend = b.sendCipher.Encrypt(nil, nil, p)
+	}
 
 	return nil
 }
@@ -847,6 +879,13 @@ func (b *Machine) Flush(w io.Writer) (int, error) {
 		if err != nil {
 			return nn, err
 		}
+	}
+
+	// If we've completely flushed the body and we have a buffer from the pool,
+	// return it now.
+	if len(b.nextBodySend) == 0 && b.bodyBuffer != nil && b.bufferPool != nil {
+		b.bufferPool.Return(b.bodyBuffer)
+		b.bodyBuffer = nil
 	}
 
 	return nn, nil

@@ -54,6 +54,18 @@ func (w *Write) Submit(inner func(*bytes.Buffer) error) error {
 	})
 }
 
+// Take returns a buffer from the underlying buffer pool directly.
+// This allows callers to use the pool without the worker pattern.
+func (w *Write) Take() *buffer.Write {
+	return w.bufferPool.Take()
+}
+
+// Return returns a buffer to the underlying buffer pool directly.
+// This allows callers to use the pool without the worker pattern.
+func (w *Write) Return(buf *buffer.Write) {
+	w.bufferPool.Return(buf)
+}
+
 // writeWorkerState is the per-goroutine state maintained by a Write pool's
 // goroutines.
 type writeWorkerState struct {

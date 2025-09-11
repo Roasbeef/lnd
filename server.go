@@ -567,11 +567,12 @@ func parseAddr(address string, netCfg tor.Net) (net.Addr, error) {
 // noiseDial is a factory function which creates a connmgr compliant dialing
 // function by returning a closure which includes the server's identity key.
 func noiseDial(idKey keychain.SingleKeyECDH,
-	netCfg tor.Net, timeout time.Duration) func(net.Addr) (net.Conn, error) {
+	netCfg tor.Net, timeout time.Duration, writePool *pool.Write) func(net.Addr) (net.Conn, error) {
 
 	return func(a net.Addr) (net.Conn, error) {
 		lnAddr := a.(*lnwire.NetAddress)
-		return brontide.Dial(idKey, lnAddr, timeout, netCfg.Dial)
+		return brontide.Dial(idKey, lnAddr, timeout, netCfg.Dial,
+			brontide.WithBufferPool(writePool))
 	}
 }
 
@@ -1698,6 +1699,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 
 			return brontide.Dial(
 				localKey, netAddr, cfg.ConnectionTimeout, dialer,
+				brontide.WithBufferPool(writePool),
 			)
 		}
 
@@ -1820,6 +1822,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			// TODO(yy): remove this check and unify the inbound
 			// connection check inside `InboundPeerConnected`.
 			s.peerAccessMan.checkAcceptIncomingConn,
+			brontide.WithBufferPool(writePool),
 		)
 		if err != nil {
 			return nil, err
@@ -1836,6 +1839,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		TargetOutbound: 100,
 		Dial: noiseDial(
 			nodeKeyECDH, s.cfg.net, s.cfg.ConnectionTimeout,
+			writePool,
 		),
 		OnConnection: s.OutboundPeerConnected,
 	})
@@ -5036,6 +5040,7 @@ func (s *server) connectToPeer(addr *lnwire.NetAddress,
 
 	conn, err := brontide.Dial(
 		s.identityECDH, addr, timeout, s.cfg.net.Dial,
+		brontide.WithBufferPool(s.writePool),
 	)
 	if err != nil {
 		srvrLog.Errorf("Unable to connect to %v: %v", addr, err)

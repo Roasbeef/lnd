@@ -5,9 +5,14 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/pool"
+	"github.com/lightningnetwork/lnd/tor"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,9 +36,8 @@ func BenchmarkReadHeaderAndBody(t *testing.B) {
 	err = noiseRemoteConn.WriteMessage(msg)
 	require.NoError(t, err, "unable to write encrypted message: %v", err)
 
-	noise := noiseRemoteConn.noise.Load()
-	cipherHeader := noise.nextHeaderSend
-	cipherMsg := noise.nextBodySend
+	cipherHeader := noiseRemoteConn.noise.nextHeaderSend
+	cipherMsg := noiseRemoteConn.noise.nextBodySend
 
 	var (
 		benchErr error
@@ -43,16 +47,15 @@ func BenchmarkReadHeaderAndBody(t *testing.B) {
 	t.ReportAllocs()
 	t.ResetTimer()
 
-	localNoise := noiseLocalConn.noise.Load()
-	nonceValue := localNoise.recvCipher.nonce
+	nonceValue := noiseLocalConn.noise.recvCipher.nonce
 	for i := 0; i < t.N; i++ {
-		pktLen, benchErr := localNoise.ReadHeader(
+		pktLen, benchErr := noiseLocalConn.noise.ReadHeader(
 			bytes.NewReader(cipherHeader),
 		)
 		require.NoError(
 			t, benchErr, "#%v: failed decryption: %v", i, benchErr,
 		)
-		_, benchErr = localNoise.ReadBody(
+		_, benchErr = noiseLocalConn.noise.ReadBody(
 			bytes.NewReader(cipherMsg), msgBuf[:pktLen],
 		)
 		require.NoError(
@@ -62,7 +65,7 @@ func BenchmarkReadHeaderAndBody(t *testing.B) {
 		// We reset the internal nonce each time as otherwise, we'd
 		// continue to increment it which would cause a decryption
 		// failure.
-		localNoise.recvCipher.nonce = nonceValue
+		noiseLocalConn.noise.recvCipher.nonce = nonceValue
 	}
 	require.NoError(t, benchErr)
 }
@@ -89,16 +92,15 @@ func BenchmarkWriteMessage(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	noise := noiseLocalConn.noise.Load()
 	for i := 0; i < b.N; i++ {
 		// Write our massive message, then call flush to actually write
 		// the encrypted message This simulates a full write operation
 		// to a network.
-		err := noise.WriteMessage(largeMsg)
+		err := noiseLocalConn.noise.WriteMessage(largeMsg)
 		if err != nil {
 			b.Fatalf("WriteMessage failed: %v", err)
 		}
-		_, err = noise.Flush(discard)
+		_, err = noiseLocalConn.noise.Flush(discard)
 		if err != nil {
 			b.Fatalf("Flush failed: %v", err)
 		}

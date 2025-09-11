@@ -27,9 +27,7 @@ var ErrConnClosed = errors.New("brontide: connection closed")
 type Conn struct {
 	conn net.Conn
 
-	// noise is stored as an atomic pointer to allow safe cleanup on Close()
-	// while preventing nil pointer dereferences from concurrent operations.
-	noise atomic.Pointer[Machine]
+	noise *Machine
 
 	readBuf bytes.Buffer
 
@@ -46,7 +44,7 @@ var _ net.Conn = (*Conn)(nil)
 // public key. In the case of a handshake failure, the connection is closed and
 // a non-nil error is returned.
 func Dial(local keychain.SingleKeyECDH, netAddr *lnwire.NetAddress,
-	timeout time.Duration, dialer tor.DialFunc) (*Conn, error) {
+	timeout time.Duration, dialer tor.DialFunc, options ...func(*Machine)) (*Conn, error) {
 
 	ipAddr := netAddr.Address.String()
 	var conn net.Conn
@@ -57,14 +55,12 @@ func Dial(local keychain.SingleKeyECDH, netAddr *lnwire.NetAddress,
 	}
 
 	b := &Conn{
-		conn: conn,
+		conn:  conn,
+		noise: NewBrontideMachine(true, local, netAddr.IdentityKey, options...),
 	}
-	// Use a Machine from the pool instead of allocating a new one.
-	b.noise.Store(getMachineFromPool(true, local, netAddr.IdentityKey))
 
 	// Initiate the handshake by sending the first act to the receiver.
-	noise := b.noise.Load()
-	actOne, err := noise.GenActOne()
+	actOne, err := b.noise.GenActOne()
 	if err != nil {
 		b.conn.Close()
 		return nil, err
@@ -92,14 +88,14 @@ func Dial(local keychain.SingleKeyECDH, netAddr *lnwire.NetAddress,
 		b.conn.Close()
 		return nil, err
 	}
-	if err := noise.RecvActTwo(actTwo); err != nil {
+	if err := b.noise.RecvActTwo(actTwo); err != nil {
 		b.conn.Close()
 		return nil, err
 	}
 
 	// Finally, complete the handshake by sending over our encrypted static
 	// key and execute the final ECDH operation.
-	actThree, err := noise.GenActThree()
+	actThree, err := b.noise.GenActThree()
 	if err != nil {
 		b.conn.Close()
 		return nil, err
@@ -132,11 +128,7 @@ func (c *Conn) ReadNextMessage() ([]byte, error) {
 	if c.closed.Load() == 1 {
 		return nil, ErrConnClosed
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return nil, ErrConnClosed
-	}
-	return noise.ReadMessage(c.conn)
+	return c.noise.ReadMessage(c.conn)
 }
 
 // ReadNextHeader uses the connection to read the next header from the brontide
@@ -147,11 +139,7 @@ func (c *Conn) ReadNextHeader() (uint32, error) {
 	if c.closed.Load() == 1 {
 		return 0, ErrConnClosed
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return 0, ErrConnClosed
-	}
-	return noise.ReadHeader(c.conn)
+	return c.noise.ReadHeader(c.conn)
 }
 
 // ReadNextBody uses the connection to read the next message body from the
@@ -162,11 +150,7 @@ func (c *Conn) ReadNextBody(buf []byte) ([]byte, error) {
 	if c.closed.Load() == 1 {
 		return nil, ErrConnClosed
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return nil, ErrConnClosed
-	}
-	return noise.ReadBody(c.conn, buf)
+	return c.noise.ReadBody(c.conn, buf)
 }
 
 // Read reads data from the connection.  Read can be made to time out and
@@ -185,11 +169,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	// depleted, then we read the next record, and feed it into the
 	// buffer. Otherwise, we read directly from the buffer.
 	if c.readBuf.Len() == 0 {
-		noise := c.noise.Load()
-		if noise == nil {
-			return 0, ErrConnClosed
-		}
-		plaintext, err := noise.ReadMessage(c.conn)
+		plaintext, err := c.noise.ReadMessage(c.conn)
 		if err != nil {
 			return 0, err
 		}
@@ -215,15 +195,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	// If the message doesn't require any chunking, then we can go ahead
 	// with a single write.
 	if len(b) <= math.MaxUint16 {
-		noise := c.noise.Load()
-		if noise == nil {
-			return 0, ErrConnClosed
-		}
-		err = noise.WriteMessage(b)
+		err = c.noise.WriteMessage(b)
 		if err != nil {
 			return 0, err
 		}
-		return noise.Flush(c.conn)
+		return c.noise.Flush(c.conn)
 	}
 
 	// If we need to split the message into fragments, then we'll write
@@ -242,15 +218,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		// Slice off the next chunk to be written based on our running
 		// counter and next chunk size.
 		chunk := b[bytesWritten : bytesWritten+chunkSize]
-		noise := c.noise.Load()
-		if noise == nil {
-			return bytesWritten, ErrConnClosed
-		}
-		if err := noise.WriteMessage(chunk); err != nil {
+		if err := c.noise.WriteMessage(chunk); err != nil {
 			return bytesWritten, err
 		}
 
-		n, err := noise.Flush(c.conn)
+		n, err := c.noise.Flush(c.conn)
 		bytesWritten += n
 		if err != nil {
 			return bytesWritten, err
@@ -271,11 +243,7 @@ func (c *Conn) WriteMessage(b []byte) error {
 	if c.closed.Load() == 1 {
 		return ErrConnClosed
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return ErrConnClosed
-	}
-	return noise.WriteMessage(b)
+	return c.noise.WriteMessage(b)
 }
 
 // Flush attempts to write a message buffered using WriteMessage to the
@@ -290,11 +258,7 @@ func (c *Conn) Flush() (int, error) {
 	if c.closed.Load() == 1 {
 		return 0, ErrConnClosed
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return 0, ErrConnClosed
-	}
-	return noise.Flush(c.conn)
+	return c.noise.Flush(c.conn)
 }
 
 // Close closes the connection. Any blocked Read or Write operations will be
@@ -307,15 +271,9 @@ func (c *Conn) Close() error {
 		return ErrConnClosed
 	}
 
-	// Atomically swap the noise pointer to nil and return the Machine
-	// to the pool for reuse. This allows the ~64KB buffers to be reused
-	// for future connections while preventing nil pointer dereferences
-	// from concurrent operations.
-	machine := c.noise.Swap(nil)
-	if machine != nil {
-		// Return the Machine to the pool after resetting its state.
-		ReturnMachineToPool(machine)
-	}
+	// With the buffer pool approach, we don't need to clear the noise object.
+	// The expensive buffers are returned to the pool during normal operation,
+	// and the small Machine struct will be garbage collected normally.
 	c.readBuf = bytes.Buffer{}
 
 	return c.conn.Close()
@@ -366,11 +324,7 @@ func (c *Conn) RemotePub() *btcec.PublicKey {
 	if c.closed.Load() == 1 {
 		return nil
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return nil
-	}
-	return noise.remoteStatic
+	return c.noise.remoteStatic
 }
 
 // LocalPub returns the local peer's static public key.
@@ -378,9 +332,5 @@ func (c *Conn) LocalPub() *btcec.PublicKey {
 	if c.closed.Load() == 1 {
 		return nil
 	}
-	noise := c.noise.Load()
-	if noise == nil {
-		return nil
-	}
-	return noise.localStatic.PubKey()
+	return c.noise.localStatic.PubKey()
 }

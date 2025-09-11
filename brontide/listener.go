@@ -29,6 +29,9 @@ type Listener struct {
 	// incoming connection or not based on its public key.
 	shouldAccept func(*btcec.PublicKey) (bool, error)
 
+	// options are applied to new Machine instances during handshake.
+	options []func(*Machine)
+
 	handshakeSema chan struct{}
 	conns         chan maybeConn
 	quit          chan struct{}
@@ -40,7 +43,7 @@ var _ net.Listener = (*Listener)(nil)
 // NewListener returns a new net.Listener which enforces the Brontide scheme
 // during both initial connection establishment and data transfer.
 func NewListener(localStatic keychain.SingleKeyECDH, listenAddr string,
-	shouldAccept func(*btcec.PublicKey) (bool, error)) (*Listener, error) {
+	shouldAccept func(*btcec.PublicKey) (bool, error), options ...func(*Machine)) (*Listener, error) {
 
 	addr, err := net.ResolveTCPAddr("tcp", listenAddr)
 	if err != nil {
@@ -56,6 +59,7 @@ func NewListener(localStatic keychain.SingleKeyECDH, listenAddr string,
 		localStatic:   localStatic,
 		tcp:           l,
 		shouldAccept:  shouldAccept,
+		options:       options,
 		handshakeSema: make(chan struct{}, defaultHandshakes),
 		conns:         make(chan maybeConn),
 		quit:          make(chan struct{}),
@@ -116,10 +120,9 @@ func (l *Listener) doHandshake(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 
 	brontideConn := &Conn{
-		conn: conn,
+		conn:  conn,
+		noise: NewBrontideMachine(false, l.localStatic, nil, l.options...),
 	}
-	// Use a Machine from the pool instead of allocating a new one.
-	brontideConn.noise.Store(getMachineFromPool(false, l.localStatic, nil))
 
 	// We'll ensure that we get ActOne from the remote peer in a timely
 	// manner. If they don't respond within handshakeReadTimeout, then
@@ -140,8 +143,7 @@ func (l *Listener) doHandshake(conn net.Conn) {
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
 		return
 	}
-	noise := brontideConn.noise.Load()
-	if err := noise.RecvActOne(actOne); err != nil {
+	if err := brontideConn.noise.RecvActOne(actOne); err != nil {
 		brontideConn.conn.Close()
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
 		return
@@ -149,7 +151,7 @@ func (l *Listener) doHandshake(conn net.Conn) {
 
 	// Next, progress the handshake processes by sending over our ephemeral
 	// key for the session along with an authenticating tag.
-	actTwo, err := noise.GenActTwo()
+	actTwo, err := brontideConn.noise.GenActTwo()
 	if err != nil {
 		brontideConn.conn.Close()
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
@@ -186,7 +188,7 @@ func (l *Listener) doHandshake(conn net.Conn) {
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
 		return
 	}
-	if err := noise.RecvActThree(actThree); err != nil {
+	if err := brontideConn.noise.RecvActThree(actThree); err != nil {
 		brontideConn.conn.Close()
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
 		return
