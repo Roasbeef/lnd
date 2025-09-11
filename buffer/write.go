@@ -4,13 +4,13 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
-// WriteSize represents the size of the maximum plaintext message than can be
-// sent using brontide. The buffer does not include extra space for the MAC, as
-// that is applied by the Noise protocol after encrypting the plaintext.
-const WriteSize = lnwire.MaxSliceLength
+// WriteSize represents the size needed for the maximum encrypted message in
+// brontide. This includes the maximum plaintext size plus the 16-byte MAC
+// that is added by the AEAD encryption.
+const WriteSize = lnwire.MaxSliceLength + 16
 
-// Write is static byte array occupying to maximum-allowed plaintext-message
-// size.
+// Write is a static byte array sized to hold the maximum encrypted message
+// including the MAC overhead.
 type Write [WriteSize]byte
 
 // Recycle zeroes the Write, making it fresh for another use.

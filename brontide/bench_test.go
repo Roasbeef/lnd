@@ -5,14 +5,9 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"net"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/lightningnetwork/lnd/keychain"
-	"github.com/lightningnetwork/lnd/pool"
-	"github.com/lightningnetwork/lnd/tor"
 	"github.com/stretchr/testify/require"
 )
 
