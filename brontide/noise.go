@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -418,6 +419,10 @@ type Machine struct {
 	// bufferPool is used to get and return large buffers for message encryption.
 	// If nil, we fall back to dynamic allocation (for backward compatibility).
 	bufferPool BufferPool
+
+	// bufferMtx protects concurrent access to bodyBuffer and nextBodySend.
+	// This is needed because Close() can be called while Flush() is running.
+	bufferMtx sync.Mutex
 }
 
 // NewBrontideMachine creates a new instance of the brontide state-machine. If
@@ -797,6 +802,9 @@ func (b *Machine) WriteMessage(p []byte) error {
 	// Finally, generate the encrypted packet itself. If we have a buffer pool,
 	// get a buffer from it for zero-allocation encryption. Otherwise fall back
 	// to dynamic allocation for backward compatibility.
+	b.bufferMtx.Lock()
+	defer b.bufferMtx.Unlock()
+	
 	if b.bufferPool != nil {
 		// Get a buffer from the pool and encrypt into it.
 		// Pass a zero-length slice with full capacity so Seal can append.
@@ -833,6 +841,10 @@ func (b *Machine) Flush(w io.Writer) (int, error) {
 			return 0, err
 		}
 	}
+
+	// Lock the mutex before accessing body buffer fields.
+	b.bufferMtx.Lock()
+	defer b.bufferMtx.Unlock()
 
 	// Next, write the pending body bytes, if any exist. Only the number of
 	// bytes written that correspond to the ciphertext will be included in
@@ -909,6 +921,9 @@ func (b *Machine) ReadMessage(r io.Reader) ([]byte, error) {
 // when the connection is closed to ensure buffers aren't leaked. It's safe
 // to call this multiple times or call Flush after this.
 func (b *Machine) ReturnBuffer() {
+	b.bufferMtx.Lock()
+	defer b.bufferMtx.Unlock()
+	
 	// Return buffer if we have one and it's from the pool.
 	if b.bodyBuffer != nil && b.bufferPool != nil {
 		b.bufferPool.Return(b.bodyBuffer)
