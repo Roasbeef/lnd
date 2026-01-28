@@ -51,6 +51,15 @@ jobs:
             2. Apply the appropriate severity label
             3. Post a detailed comment explaining your determination
 
+            ## Tool Constraints (IMPORTANT)
+
+            You MUST only use these specific commands:
+            - `gh pr view` - to read PR metadata (files, labels, etc.)
+            - `gh pr edit --add-label` / `--remove-label` - to manage labels
+            - `gh pr comment` - to post comments
+
+            NEVER use `gh api` or any other commands. They are not permitted and will fail.
+
             ## Severity Levels
 
             **CRITICAL** (severity-critical) - Requires expert review:
