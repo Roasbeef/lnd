@@ -306,9 +306,10 @@ type Config struct {
 	// sphinx onion blobs.
 	SphinxPayment *hop.OnionProcessor
 
-	// OnionEndpoint handles incoming onion messages and routes them to the
-	// appropriate peer actor for forwarding or processes them locally.
-	OnionEndpoint *onionmessage.OnionEndpoint
+	// SpawnOnionActor creates a per-peer onion message processing actor
+	// with all server-level dependencies captured. Nil when onion messaging
+	// is disabled.
+	SpawnOnionActor onionmessage.OnionActorFactory
 
 	// WitnessBeacon is used when setting up ChannelLinks so they can add any
 	// preimages that they learn.
@@ -914,40 +915,22 @@ func (p *Brontide) Start() error {
 		return fmt.Errorf("unable to load channels: %w", err)
 	}
 
-	// If the remote peer supports onion messages, then we'll spawn the
-	// onion peer actor, which will be used to send onion messages **to**
-	// the remote peer.
-	if p.remoteFeatures.HasFeature(lnwire.OnionMessagesOptional) {
+	// If the remote peer supports onion messages and the factory is
+	// available, spawn the per-peer onion message processing actor. The
+	// factory captures all server-level dependencies; we only provide the
+	// actor system and peer public key.
+	if p.remoteFeatures.HasFeature(lnwire.OnionMessagesOptional) &&
+		p.cfg.SpawnOnionActor != nil {
+
 		p.log.Infof("Remote peer supports onion messages, " +
-			"registering onion message actor")
-		sender := func(msg *lnwire.OnionMessage) {
-			if err := p.SendMessageLazy(false, msg); err != nil {
-				p.log.Warnf("Failed to send onion message: %v",
-					err)
-			}
-		}
-		_, err := onionmessage.SpawnOnionPeerActor(
-			p.cfg.ActorSystem, sender, p.PubKey(),
+			"spawning onion message actor")
+
+		_, err := p.cfg.SpawnOnionActor(
+			p.cfg.ActorSystem, p.PubKey(),
 		)
 		if err != nil {
 			return fmt.Errorf("unable to spawn onion peer "+
 				"actor: %w", err)
-		}
-	}
-
-	// Register the onion message endpoint with this peer's message router.
-	// The endpoint is shared across all peers and handles incoming onion
-	// messages by routing them to the appropriate peer actor for forwarding
-	// or processing them locally. Skip if onion messaging is disabled.
-	if p.cfg.OnionEndpoint != nil {
-		err = fn.MapOptionZ(p.msgRouter, func(r msgmux.Router) error {
-			_ = r.UnregisterEndpoint(p.cfg.OnionEndpoint.Name())
-
-			return r.RegisterEndpoint(p.cfg.OnionEndpoint)
-		})
-		if err != nil {
-			return fmt.Errorf("unable to register endpoint for "+
-				"onion messaging: %w", err)
 		}
 	}
 
@@ -2288,6 +2271,18 @@ out:
 			*lnwire.ReplyShortChanIDsEnd:
 
 			discStream.AddMsg(msg)
+
+		case *lnwire.OnionMessage:
+			// Dispatch onion messages directly to the per-peer
+			// onion actor via the service key, bypassing the
+			// msgRouter entirely.
+			serviceKey, _ := onionmessage.NewOnionMessageServiceKey(
+				p.PubKey(),
+			)
+			ref := serviceKey.Ref(p.cfg.ActorSystem)
+			ref.Tell(context.TODO(), &onionmessage.Request{
+				Msg: *msg,
+			})
 
 		case *lnwire.Custom:
 			err := p.handleCustomMessage(msg)

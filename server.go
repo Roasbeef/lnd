@@ -424,9 +424,10 @@ type server struct {
 
 	onionMessageServer *subscribe.Server
 
-	// onionEndpoint handles incoming onion messages and routes them to the
-	// appropriate peer actor for forwarding or processes them locally.
-	onionEndpoint *onionmessage.OnionEndpoint
+	// onionActorFactory creates per-peer onion message actors with all
+	// server-level dependencies captured. Nil when onion messaging is
+	// disabled.
+	onionActorFactory onionmessage.OnionActorFactory
 
 	// actorSystem is the actor system tasked with handling actors that are
 	// created for this server.
@@ -2359,27 +2360,22 @@ func (s *server) Start(ctx context.Context) error {
 			return
 		}
 
-		// Create the onion message endpoint that handles incoming onion
-		// messages for all peers. This is shared across all peer
-		// connections and registered with each peer's message router.
-		// Skip if onion messaging is disabled via config.
+		// Create the onion actor factory that will spawn per-peer onion
+		// message processing actors. All server-level dependencies are
+		// captured in the factory closure. Skip if onion messaging is
+		// disabled via config.
 		if !s.cfg.ProtocolOptions.NoOnionMessages() {
 			resolver := onionmessage.NewGraphNodeResolver(
 				s.graphDB, s.identityECDH.PubKey(),
 			)
-			s.onionEndpoint, err = onionmessage.NewOnionEndpoint(
-				s.actorSystem.Receptionist(),
-				s.sphinxOnionMsg,
+			s.onionActorFactory = onionmessage.NewOnionActorFactory(
+				&sphinxOnionMsgRouter{
+					router: s.sphinxOnionMsg,
+				},
 				resolver,
-				onionmessage.WithMessageServer(
-					s.onionMessageServer,
-				),
+				s,
+				s.onionMessageServer,
 			)
-			if err != nil {
-				startErr = fmt.Errorf("unable to create onion "+
-					"message endpoint: %w", err)
-				return
-			}
 		}
 
 		cleanup = cleanup.add(s.chanStatusMgr.Stop)
@@ -3930,6 +3926,20 @@ func (s *server) findPeerByPubStr(pubStr string) (*peer.Brontide, error) {
 	return peer, nil
 }
 
+// SendToPeer sends a wire message to the peer identified by pubKey. This
+// implements the onionmessage.PeerMessageSender interface, following the
+// gossiper pattern of server-backed peer lookup and synchronous send.
+func (s *server) SendToPeer(pubKey [33]byte,
+	msg lnwire.Message) error {
+
+	peer, err := s.FindPeerByPubStr(string(pubKey[:]))
+	if err != nil {
+		return err
+	}
+
+	return peer.SendMessage(true, msg)
+}
+
 // nextPeerBackoff computes the next backoff duration for a peer's pubkey using
 // exponential backoff. If no previous backoff was known, the default is
 // returned.
@@ -4450,7 +4460,7 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		BestBlockView:           s.cc.BestBlockTracker,
 		RoutingPolicy:           s.cc.RoutingPolicy,
 		SphinxPayment:           s.sphinxPayment,
-		OnionEndpoint:           s.onionEndpoint,
+		SpawnOnionActor:         s.onionActorFactory,
 		WitnessBeacon:           s.witnessBeacon,
 		Invoices:                s.invoices,
 		ChannelNotifier:         s.channelNotifier,

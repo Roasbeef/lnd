@@ -33,7 +33,6 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/netann"
-	"github.com/lightningnetwork/lnd/onionmessage"
 	"github.com/lightningnetwork/lnd/pool"
 	"github.com/lightningnetwork/lnd/queue"
 	"github.com/lightningnetwork/lnd/shachain"
@@ -726,22 +725,13 @@ func createTestPeer(t *testing.T) *peerTestCtx {
 		require.NoError(t, actorSystem.Shutdown())
 	})
 
-	// Create the onion endpoint for tests.
-	onionEndpoint, err := onionmessage.NewOnionEndpoint(
-		actorSystem.Receptionist(),
-		router,
-		&noopNodeIDResolver{},
-		onionmessage.WithMessageServer(onionMsgServer),
-	)
-	require.NoError(t, err)
-
 	estimator := chainfee.NewStaticEstimator(12500, 0)
 
 	cfg := &Config{
 		Addr:              cfgAddr,
 		PubKeyBytes:       pubKey,
 		ServerPubKey:      serverKeyArr,
-		OnionEndpoint:     onionEndpoint,
+		SpawnOnionActor:   nil,
 		ActorSystem:       actorSystem,
 		ErrorBuffer:       errBuffer,
 		ChainIO:           chainIO,
