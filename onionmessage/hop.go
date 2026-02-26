@@ -51,7 +51,7 @@ type NodeIDResolver interface {
 // recipient data, and derives the next path key. It returns a fn.Result type
 // containing a routingAction, which contains all the information required to
 // execute the next step in the routing process.
-func processOnionMessage(router *sphinx.Router, resolver NodeIDResolver,
+func processOnionMessage(router OnionRouter, resolver NodeIDResolver,
 	msg *lnwire.OnionMessage) fn.Result[routingAction] {
 
 	var onionPkt sphinx.OnionPacket
@@ -164,7 +164,7 @@ func createRoutingAction(resolver NodeIDResolver,
 
 // deriveNextPathKey derives the next path key using the router and current
 // path key. If an override is provided, it is used instead.
-func deriveNextPathKey(router *sphinx.Router, currentPathKey *btcec.PublicKey,
+func deriveNextPathKey(router OnionRouter, currentPathKey *btcec.PublicKey,
 	override tlv.OptionalRecordT[tlv.TlvType8,
 		*btcec.PublicKey]) *btcec.PublicKey {
 
