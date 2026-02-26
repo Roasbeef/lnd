@@ -327,6 +327,63 @@ func (sk ServiceKey[M, R]) Unregister(as *ActorSystem,
 	return unregisteredFromReceptionist && stoppedAndRemoved
 }
 
+// RouterOption is a functional option for configuring a router created via
+// ServiceKey.Ref().
+type RouterOption[M Message, R any] func(*routerConfig[M, R])
+
+// routerConfig holds configuration for router creation.
+type routerConfig[M Message, R any] struct {
+	strategy RoutingStrategy[M, R]
+}
+
+// WithStrategy specifies a custom routing strategy for the router returned by
+// ServiceKey.Ref().
+func WithStrategy[M Message, R any](
+	strategy RoutingStrategy[M, R]) RouterOption[M, R] {
+
+	return func(cfg *routerConfig[M, R]) {
+		cfg.strategy = strategy
+	}
+}
+
+// Ref returns a virtual ActorRef (Router) that automatically load-balances
+// messages across all actors registered under this service key. This is the
+// recommended way for components to interact with services, as it provides
+// location transparency and automatic failover. The router uses round-robin
+// strategy by default, but can be customized with functional options.
+func (sk ServiceKey[M, R]) Ref(
+	sys SystemContext, opts ...RouterOption[M, R]) ActorRef[M, R] {
+
+	cfg := &routerConfig[M, R]{
+		strategy: NewRoundRobinStrategy[M, R](),
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return NewRouter(
+		sys.Receptionist(), sk, cfg.strategy, sys.DeadLetters(),
+	)
+}
+
+// Broadcast sends a message to ALL actors registered under this service key.
+// This is useful for fan-out notifications, cache invalidation, or coordinated
+// shutdown signals. The context applies to all send operations. Returns the
+// number of actors the message was sent to. Note that this is a fire-and-forget
+// operation and does not guarantee delivery or processing.
+func (sk ServiceKey[M, R]) Broadcast(
+	sys SystemContext, ctx context.Context, msg M) int {
+
+	refs := FindInReceptionist(sys.Receptionist(), sk)
+
+	for _, ref := range refs {
+		ref.Tell(ctx, msg)
+	}
+
+	return len(refs)
+}
+
 // UnregisterAll finds all actor references associated with this service key in
 // the ActorSystem's receptionist. For each found actor, it attempts to stop it
 // and remove it from system management, and also unregisters it from the

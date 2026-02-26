@@ -117,3 +117,15 @@ type ActorBehavior[M Message, R any] interface {
 	// detect actor shutdown requests.
 	Receive(actorCtx context.Context, msg M) fn.Result[R]
 }
+
+// SystemContext defines the minimal interface for system capabilities needed by
+// actors and service keys. This narrow interface enables dependency injection
+// and unit testing without requiring a full ActorSystem instance.
+type SystemContext interface {
+	// Receptionist returns the system's receptionist for actor discovery.
+	Receptionist() *Receptionist
+
+	// DeadLetters returns a reference to the dead letter actor for
+	// undeliverable messages.
+	DeadLetters() ActorRef[Message, any]
+}
