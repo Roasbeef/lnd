@@ -71,7 +71,8 @@
   regardless of this setting. On a node running the native SQL backend the
   intervals are persisted across restarts; a bound restored from disk is
   applied as soft evidence with a probability floor, so that a belief which
-  has gone stale can still be corrected by an attempt.
+  has gone stale can still be corrected by an attempt. The algorithm is
+  explained in [`docs/interval_routing.md`](../interval_routing.md).
 
 ## RPC Additions
 
