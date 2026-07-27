@@ -68,7 +68,10 @@
   carries it rather than halving its way down after a failure, and it retries a
   channel at a lower amount rather than stepping around it. The default remains
   unchanged, and payments to blinded paths are served by the default router
-  regardless of this setting.
+  regardless of this setting. On a node running the native SQL backend the
+  intervals are persisted across restarts; a bound restored from disk is
+  applied as soft evidence with a probability floor, so that a belief which
+  has gone stale can still be corrected by an attempt.
 
 ## RPC Additions
 
@@ -148,6 +151,11 @@
 ## Testing
 
 ## Database
+
+* A new `liquidity_intervals` table
+  [stores](https://github.com/lightningnetwork/lnd/pull/0) the liquidity
+  beliefs of the experimental interval router, so that they survive a restart
+  on nodes running the native SQL backend.
 
 ## Code Health
 

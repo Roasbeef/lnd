@@ -411,7 +411,7 @@ func TestIntervalStoreSettlement(t *testing.T) {
 
 	// A settlement of the whole capacity leaves nothing behind rather than
 	// wrapping around.
-	store.Clear()
+	require.NoError(t, store.Clear(t.Context()))
 	store.RecordSettlement(testIntervalKey, capacity, capacity)
 
 	drained := store.Get(testIntervalKey, capacity)
@@ -610,6 +610,6 @@ func TestIntervalStoreEviction(t *testing.T) {
 	}
 	require.True(t, store.Get(last, capacity).Known)
 
-	store.Clear()
+	require.NoError(t, store.Clear(t.Context()))
 	require.Zero(t, store.Len())
 }

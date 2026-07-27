@@ -1,8 +1,12 @@
 package routing
 
 import (
+	"context"
+	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/lightningnetwork/lnd/lnwire"
 )
@@ -13,6 +17,10 @@ import (
 // its own history the same way, for the same reason: a long lived node would
 // otherwise accumulate an entry for every channel it has ever touched.
 const DefaultMaxIntervalHistory = 10000
+
+// DefaultIntervalFlushInterval is how often the store writes accumulated
+// beliefs down when a persister is attached.
+const DefaultIntervalFlushInterval = time.Second
 
 // intervalEvictionFraction is the fraction of the store dropped when it grows
 // past its bound. Evicting a batch rather than a single entry keeps the cost of
@@ -29,6 +37,38 @@ type intervalEntry struct {
 	seq uint64
 }
 
+// PersistedInterval is one belief as it is written to and read from durable
+// storage.
+type PersistedInterval struct {
+	// Key identifies the directed channel the belief is about.
+	Key IntervalKey
+
+	// Interval is the belief itself.
+	Interval LiquidityInterval
+}
+
+// IntervalPersister is the durable backing of an IntervalStore. It is an
+// interface rather than a concrete store so that the routing package does not
+// have to care which database is underneath, and so that a node with no SQL
+// backend configured simply runs without one.
+type IntervalPersister interface {
+	// FetchIntervals returns at most limit of the most recently written
+	// beliefs.
+	FetchIntervals(ctx context.Context, limit int) ([]PersistedInterval,
+		error)
+
+	// StoreIntervals writes the given beliefs, replacing any already held
+	// for the same directed channels.
+	StoreIntervals(ctx context.Context, intervals []PersistedInterval) error
+
+	// PruneIntervals drops all but the given number of most recently
+	// written beliefs.
+	PruneIntervals(ctx context.Context, keep int) error
+
+	// PurgeIntervals drops every stored belief.
+	PurgeIntervals(ctx context.Context) error
+}
+
 // IntervalStore holds the router's belief about the liquidity of every directed
 // channel it has observed. It plays the role mission control plays for the
 // stock router, with two differences that matter. It records amount intervals
@@ -37,13 +77,13 @@ type intervalEntry struct {
 //
 // The store lives for as long as the node does and is shared by every payment,
 // which is what makes the beliefs one payment gathers available to the next.
-//
-// NOTE: the store is held in memory only. Persisting it across restarts is
-// future work, and it would need care: an interval restored from disk describes
-// a network state that may no longer exist, and a hard upper bound has no way
-// back once it is wrong. A persisted bound should clamp to a small probability
-// rather than to zero.
+// With a persister attached it also outlives the process, in which case the
+// beliefs it reads back are marked restored, since a bound written down before
+// a restart describes a network that has had every chance to move on.
 type IntervalStore struct {
+	started atomic.Bool
+	stopped atomic.Bool
+
 	mu sync.Mutex
 
 	// entries holds one belief per directed channel.
@@ -54,10 +94,24 @@ type IntervalStore struct {
 
 	// seq is a monotonic counter used to order entries for eviction.
 	seq uint64
+
+	// persister is the durable backing, or nil when the store is memory
+	// only. Everything below it is unused in that case.
+	persister IntervalPersister
+
+	// flushInterval is how often accumulated changes are written down.
+	flushInterval time.Duration
+
+	// dirty holds the keys written since the last flush.
+	dirty map[IntervalKey]struct{}
+
+	quit chan struct{}
+	wg   sync.WaitGroup
 }
 
 // NewIntervalStore builds an empty store bounded at the given number of
-// directed channels. A non-positive bound selects the default.
+// directed channels. A non-positive bound selects the default. The store is
+// memory only until a persister is attached.
 func NewIntervalStore(maxEntries int) *IntervalStore {
 	if maxEntries <= 0 {
 		maxEntries = DefaultMaxIntervalHistory
@@ -66,7 +120,153 @@ func NewIntervalStore(maxEntries int) *IntervalStore {
 	return &IntervalStore{
 		entries:    make(map[IntervalKey]*intervalEntry),
 		maxEntries: maxEntries,
+		quit:       make(chan struct{}),
 	}
+}
+
+// UsePersistence attaches durable storage to the store. It must be called
+// before Start.
+func (s *IntervalStore) UsePersistence(persister IntervalPersister,
+	flushInterval time.Duration) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if flushInterval <= 0 {
+		flushInterval = DefaultIntervalFlushInterval
+	}
+
+	s.persister = persister
+	s.flushInterval = flushInterval
+	s.dirty = make(map[IntervalKey]struct{})
+}
+
+// Start loads whatever beliefs were written down before this process began and
+// starts the goroutine that writes new ones. It is a no-op on a store with no
+// persister, which is what a node running without a SQL backend has.
+func (s *IntervalStore) Start(ctx context.Context) error {
+	if !s.started.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	s.mu.Lock()
+	persister := s.persister
+	limit := s.maxEntries
+	s.mu.Unlock()
+
+	if persister == nil {
+		return nil
+	}
+
+	stored, err := persister.FetchIntervals(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("unable to load liquidity intervals: %w", err)
+	}
+
+	for _, entry := range stored {
+		s.Restore(entry.Key, entry.Interval)
+	}
+
+	// Reading beliefs in is not a reason to write them straight back out.
+	s.mu.Lock()
+	clear(s.dirty)
+	s.mu.Unlock()
+
+	log.Infof("Loaded %d liquidity interval beliefs", len(stored))
+
+	s.wg.Add(1)
+	go s.flusher()
+
+	return nil
+}
+
+// Stop writes down anything still pending and stops the flush goroutine.
+func (s *IntervalStore) Stop() error {
+	if !s.started.Load() || !s.stopped.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	close(s.quit)
+	s.wg.Wait()
+
+	// A shutdown is the one moment we know there will be no further
+	// observations, so it is worth paying for a last write.
+	return s.flush(context.Background())
+}
+
+// flusher writes accumulated changes down on a ticker.
+//
+// NOTE: this must be run as a goroutine.
+func (s *IntervalStore) flusher() {
+	defer s.wg.Done()
+
+	s.mu.Lock()
+	interval := s.flushInterval
+	s.mu.Unlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.flush(context.Background()); err != nil {
+				log.Errorf("Unable to flush liquidity "+
+					"intervals: %v", err)
+			}
+
+		case <-s.quit:
+			return
+		}
+	}
+}
+
+// flush writes every belief changed since the last call.
+//
+// A ticker rather than a write on every observation is deliberate. One payment
+// attempt writes both directions of every hop it touched, so a write through
+// store would put a handful of database round trips on the path between an
+// HTLC failing and the next route being chosen, which is the one path in the
+// router that a user waits on. Nothing here needs to survive a crash to stay
+// correct either: a belief that never reached disk is a belief the router
+// rediscovers on its next attempt, at the cost of that attempt. Mission control
+// batches its own writes for the same reasons.
+func (s *IntervalStore) flush(ctx context.Context) error {
+	s.mu.Lock()
+
+	if s.persister == nil || len(s.dirty) == 0 {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	pending := make([]PersistedInterval, 0, len(s.dirty))
+	for key := range s.dirty {
+		entry, ok := s.entries[key]
+		if !ok {
+			continue
+		}
+
+		pending = append(pending, PersistedInterval{
+			Key:      key,
+			Interval: entry.LiquidityInterval,
+		})
+	}
+
+	// Clear the dirty set before releasing the lock. An observation that
+	// lands during the write below marks its key again, so the worst case
+	// is that we write it twice rather than lose it.
+	clear(s.dirty)
+
+	persister := s.persister
+	limit := s.maxEntries
+	s.mu.Unlock()
+
+	if err := persister.StoreIntervals(ctx, pending); err != nil {
+		return err
+	}
+
+	return persister.PruneIntervals(ctx, limit)
 }
 
 // Get returns the belief held for the given directed channel, normalized
@@ -167,6 +367,10 @@ func (s *IntervalStore) update(key IntervalKey, amt,
 
 	apply(&forward.LiquidityInterval, &reverse.LiquidityInterval, amt)
 
+	// Every observation writes both directions, so both need writing down.
+	s.markDirtyLocked(key)
+	s.markDirtyLocked(key.Reverse())
+
 	s.evictLocked()
 }
 
@@ -185,6 +389,19 @@ func (s *IntervalStore) entryLocked(key IntervalKey) *intervalEntry {
 	entry.seq = s.seq
 
 	return entry
+}
+
+// markDirtyLocked records that a key needs writing down. It is a no-op on a
+// store with no persister, which is what keeps the memory only path free of
+// any bookkeeping it would never read.
+//
+// NOTE: the store's mutex must be held.
+func (s *IntervalStore) markDirtyLocked(key IntervalKey) {
+	if s.dirty == nil {
+		return
+	}
+
+	s.dirty[key] = struct{}{}
 }
 
 // evictLocked drops the least recently written entries when the store has grown
@@ -208,6 +425,10 @@ func (s *IntervalStore) evictLocked() {
 	drop := len(s.entries) / intervalEvictionFraction
 	for _, key := range keys[:drop] {
 		delete(s.entries, key)
+
+		if s.dirty != nil {
+			delete(s.dirty, key)
+		}
 	}
 }
 
@@ -236,6 +457,10 @@ func (s *IntervalStore) Restore(key IntervalKey,
 	entry.markRestored()
 
 	s.evictLocked()
+
+	// A restored belief is already on disk, and the halved confidence it
+	// now carries is a reading of it rather than a new observation, so
+	// there is nothing here worth writing back.
 }
 
 // ForEach hands every belief the store holds to the callback, which is how a
@@ -252,12 +477,23 @@ func (s *IntervalStore) ForEach(cb func(IntervalKey, LiquidityInterval)) {
 // Clear forgets everything the store has learned. It exists so that an operator
 // can reset the router's beliefs the way mission control's history can be
 // reset.
-func (s *IntervalStore) Clear() {
+func (s *IntervalStore) Clear(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.entries = make(map[IntervalKey]*intervalEntry)
 	s.seq = 0
+
+	persister := s.persister
+	if s.dirty != nil {
+		clear(s.dirty)
+	}
+	s.mu.Unlock()
+
+	if persister == nil {
+		return nil
+	}
+
+	return persister.PurgeIntervals(ctx)
 }
 
 // Len returns the number of directed channels the store currently holds a
