@@ -170,6 +170,12 @@ type intervalPaymentSession struct {
 	// the same scale it was priced with.
 	capacities map[IntervalKey]lnwire.MilliSatoshi
 
+	// scopes remembers, for each hop of a route we dispatched, the key the
+	// hop was priced under. A hop across a pair with several channels is
+	// priced and recorded at pair scope, because nothing in an onion
+	// failure says which of the channels carried the payment.
+	scopes map[IntervalKey]IntervalKey
+
 	attempts       uint32
 	failedAttempts uint32
 	settledParts   uint32
@@ -210,6 +216,7 @@ func newIntervalPaymentSession(p *LightningPayment, selfNode route.Vertex,
 		suspects:          make(map[IntervalKey]uint32),
 		routeFailedAt:     make(map[string]lnwire.MilliSatoshi),
 		capacities:        make(map[IntervalKey]lnwire.MilliSatoshi),
+		scopes:            make(map[IntervalKey]IntervalKey),
 	}, nil
 }
 
@@ -218,6 +225,7 @@ func newIntervalPaymentSession(p *LightningPayment, selfNode route.Vertex,
 type intervalChoice struct {
 	route   *route.Route
 	edges   []*unifiedEdge
+	cache   *intervalGraphCache
 	shard   lnwire.MilliSatoshi
 	utility float64
 }
@@ -332,7 +340,7 @@ func (p *intervalPaymentSession) RequestRoute(maxAmt,
 	}
 
 	p.attempts++
-	p.recordCapacities(best.edges)
+	p.recordCapacities(best.edges, best.cache)
 
 	p.log.Debugf("Attempting shard of %v out of %v remaining over %v hops",
 		best.shard, maxAmt, len(best.route.Hops))
@@ -477,6 +485,7 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 		choice := &intervalChoice{
 			route: rt,
 			edges: pathEdges,
+			cache: params.cache,
 			shard: shard,
 			utility: intervalUtility(
 				rt, shard, req.maxAmt, req.minimum, risk,
@@ -759,7 +768,7 @@ func (p *intervalPaymentSession) ReportAttemptSuccess(_ uint64,
 
 	p.settledParts++
 
-	for i, key := range intervalRouteKeys(rt) {
+	for i, key := range p.routeKeys(rt) {
 		amt := intervalHopAmount(rt, i)
 
 		if key.From != p.selfNode {
@@ -799,7 +808,7 @@ func (p *intervalPaymentSession) ReportAttemptFailure(_ uint64, rt *route.Route,
 
 	p.failedAttempts++
 
-	keys := intervalRouteKeys(rt)
+	keys := p.routeKeys(rt)
 
 	// A failure we cannot attribute to any node, or one whose message we
 	// could not read, tells us only that something on this route went
@@ -1039,22 +1048,54 @@ func (p *intervalPaymentSession) decayPenalty(key IntervalKey, factor float64) {
 // them, leaves no capacity behind. The observations it produces are then
 // dropped by the store, which is the right outcome, since an interval means
 // nothing without the scale it is measured against.
-func (p *intervalPaymentSession) recordCapacities(edges []*unifiedEdge) {
+func (p *intervalPaymentSession) recordCapacities(edges []*unifiedEdge,
+	cache *intervalGraphCache) {
+
 	from := p.selfNode
 	for _, edge := range edges {
 		to := edge.policy.ToNodePubKey()
 
+		key := IntervalKey{
+			ChanID: edge.policy.ChannelID,
+			From:   from,
+			To:     to,
+		}
+
+		// Record the hop under the same key it was priced under, so
+		// that what we learn from the attempt lands where the next
+		// search will look for it.
+		scoped := intervalScopeKey(key, cache.siblingCount(from, to))
+		if scoped != key {
+			p.scopes[key] = scoped
+		}
+
 		capacity := lnwire.NewMSatFromSatoshis(edge.capacity)
 		if capacity > 0 {
-			p.capacities[IntervalKey{
-				ChanID: edge.policy.ChannelID,
-				From:   from,
-				To:     to,
-			}] = capacity
+			p.capacities[scoped] = capacity
 		}
 
 		from = to
 	}
+}
+
+// scoped returns the key a hop of a dispatched route was priced under.
+func (p *intervalPaymentSession) scoped(key IntervalKey) IntervalKey {
+	if scoped, ok := p.scopes[key]; ok {
+		return scoped
+	}
+
+	return key
+}
+
+// routeKeys returns the key of every hop of a route, at the scope the hop was
+// priced under.
+func (p *intervalPaymentSession) routeKeys(rt *route.Route) []IntervalKey {
+	keys := intervalRouteKeys(rt)
+	for i, key := range keys {
+		keys[i] = p.scoped(key)
+	}
+
+	return keys
 }
 
 // intervalRouteKeys returns the directed channel key of every hop of a route.

@@ -281,6 +281,23 @@ func newIntervalGraphCache() *intervalGraphCache {
 	}
 }
 
+// siblingCount returns how many channels connect the given directed pair, or
+// zero when the search never looked at that pair. It is what decides whether an
+// observation about a hop is allowed to name a channel.
+func (c *intervalGraphCache) siblingCount(from, to route.Vertex) int {
+	unifiers, ok := c.unifiers[to]
+	if !ok {
+		return 0
+	}
+
+	unifier, ok := unifiers[from]
+	if !ok {
+		return 0
+	}
+
+	return len(unifier.edges)
+}
+
 // findIntervalPath searches for a route from source to target able to deliver
 // amt, scoring hops with the interval belief model. Like the stock path finder
 // it searches backwards from the target so that fees and amounts accumulate in
@@ -537,7 +554,9 @@ func (s *intervalSearch) expand(ctx context.Context,
 			continue
 		}
 
-		s.processEdge(fromNode, edge, label)
+		// How many channels this pair has decides whether an
+		// observation about the hop can name one of them.
+		s.processEdge(fromNode, edge, label, len(unifier.edges))
 	}
 
 	return nil
@@ -547,7 +566,7 @@ func (s *intervalSearch) expand(ctx context.Context,
 // hop respects every restriction and is not dominated by a label the node
 // already holds.
 func (s *intervalSearch) processEdge(fromNode route.Vertex, edge *unifiedEdge,
-	label *intervalLabel) {
+	label *intervalLabel, siblings int) {
 
 	p := s.params
 
@@ -573,11 +592,12 @@ func (s *intervalSearch) processEdge(fromNode route.Vertex, edge *unifiedEdge,
 	}
 
 	probability := p.probability(
-		IntervalKey{
+		intervalScopeKey(IntervalKey{
 			ChanID: edge.policy.ChannelID,
 			From:   fromNode,
 			To:     label.node,
-		}, amountToSend, lnwire.NewMSatFromSatoshis(edge.capacity),
+		}, siblings),
+		amountToSend, lnwire.NewMSatFromSatoshis(edge.capacity),
 	)
 	if probability <= 0 {
 		return

@@ -227,6 +227,12 @@ type IntervalKey struct {
 	To route.Vertex
 }
 
+// intervalPairScopeChanID marks a belief held about a node pair as a whole
+// rather than about one channel between them. Zero is safe to use for this
+// because it is not a short channel id any real channel can have: it would name
+// the first output of the first transaction of the genesis block.
+const intervalPairScopeChanID = 0
+
 // Reverse returns the key for the opposite direction of the same channel.
 func (k IntervalKey) Reverse() IntervalKey {
 	return IntervalKey{
@@ -234,6 +240,51 @@ func (k IntervalKey) Reverse() IntervalKey {
 		From:   k.To,
 		To:     k.From,
 	}
+}
+
+// PairScope returns the key describing the node pair this channel connects,
+// which is the granularity an observation has to fall back to when it cannot
+// name a channel.
+func (k IntervalKey) PairScope() IntervalKey {
+	return IntervalKey{
+		ChanID: intervalPairScopeChanID,
+		From:   k.From,
+		To:     k.To,
+	}
+}
+
+// IsPairScoped reports whether this key describes a node pair rather than a
+// channel.
+func (k IntervalKey) IsPairScoped() bool {
+	return k.ChanID == intervalPairScopeChanID
+}
+
+// intervalScopeKey returns the key an observation about a hop should be written
+// under, given how many channels connect the pair the hop crosses.
+//
+// A channel is the granularity this model wants, because the quantity it tracks
+// is the balance sitting on one side of one funding output. It is not always
+// the granularity the evidence supports. Under non-strict forwarding a node
+// asked to forward over one channel may use any channel it has to the same
+// peer, and an onion failure names neither. So when a pair has more than one
+// channel, an observation is written about the pair instead.
+//
+// The alternative, writing the same observation onto every channel of the pair,
+// is worse rather than merely coarser. This model's upper bound is hard: an
+// amount at or above it is impossible, and no amount of reduced confidence
+// softens that, because confidence enters the model as a small additive term
+// and never as a multiplier on the bound. Spreading a failure across siblings
+// would therefore assert something false and unrecoverable about every channel
+// that was not the one to refuse. Pair scope asserts only what was observed,
+// which is that this peer could not move this amount to that node. It is also
+// the granularity mission control has always used, so it is a loss of
+// resolution rather than a loss of correctness.
+func intervalScopeKey(key IntervalKey, siblings int) IntervalKey {
+	if siblings > 1 {
+		return key.PairScope()
+	}
+
+	return key
 }
 
 // LiquidityInterval is what we believe about the liquidity available in one
