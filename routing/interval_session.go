@@ -176,9 +176,27 @@ type intervalPaymentSession struct {
 	// failure says which of the channels carried the payment.
 	scopes map[IntervalKey]IntervalKey
 
+	// outstanding holds the shards this session has handed to the payment
+	// lifecycle and not yet seen resolved, oldest first. Every entry is
+	// mirrored into the node wide overlay, so this slice is also the record
+	// of what this session owes back to it.
+	outstanding []*heldShard
+
 	attempts       uint32
 	failedAttempts uint32
 	settledParts   uint32
+}
+
+// heldShard is one route this session returned, and the amounts it committed
+// on each directed channel of that route.
+type heldShard struct {
+	// routeKey identifies the route, so that an outcome reported later can
+	// be matched back to the shard that produced it.
+	routeKey string
+
+	// amounts is what the shard committed, keyed at the same scope the
+	// route was priced under.
+	amounts map[IntervalKey]lnwire.MilliSatoshi
 }
 
 // A compile time assertion to ensure the interval session satisfies both the
@@ -245,6 +263,11 @@ func (p *intervalPaymentSession) RequestRoute(maxAmt,
 	if maxAmt == 0 {
 		return nil, errNoPathFound
 	}
+
+	// The lifecycle reads the number of HTLCs in flight from the payments
+	// database, so it is the one count we can trust. Reconcile our own
+	// record of what we are holding against it before pricing anything.
+	p.reconcileHolds(activeShards)
 
 	// A session that believes it can always find one more route would
 	// otherwise spin until the payment times out.
@@ -341,6 +364,7 @@ func (p *intervalPaymentSession) RequestRoute(maxAmt,
 
 	p.attempts++
 	p.recordCapacities(best.edges, best.cache)
+	p.holdRoute(best.route)
 
 	p.log.Debugf("Attempting shard of %v out of %v remaining over %v hops",
 		best.shard, maxAmt, len(best.route.Hops))
@@ -705,13 +729,29 @@ func (p *intervalPaymentSession) edgeProbability(key IntervalKey,
 		return 0
 	}
 
+	var probability float64
+
+	// Our own in-flight HTLCs have already committed part of what this edge
+	// had when we last looked at it, so a new shard of amt needs the edge
+	// to have held amt on top of what we are holding. Asking the model
+	// about the sum is the whole of the adjustment: it needs no new term,
+	// because every bound and every branch already answers the question
+	// "was there this much here".
+	//
+	// The first hop is the exception. The switch nets our in-flight HTLCs
+	// out of the bandwidth it reports for our own links, so the pathfinder
+	// has already been told, and adding the hold here would charge the same
+	// liquidity twice.
+	effective := amt
+	if key.From != p.selfNode {
+		effective += p.store.Held(key)
+	}
+
 	failedAt := p.failedAt[key]
-	retryFactor := intervalRetryFactor(amt, failedAt)
+	retryFactor := intervalRetryFactor(effective, failedAt)
 	if retryFactor == 0 {
 		return 0
 	}
-
-	var probability float64
 
 	if key.From == p.selfNode {
 		// We know our own balances exactly, and the bandwidth hints
@@ -721,11 +761,11 @@ func (p *intervalPaymentSession) edgeProbability(key IntervalKey,
 		probability = intervalLocalProbability
 	} else {
 		interval := p.store.Get(key, capacity)
-		probability = interval.Probability(amt, capacity)
+		probability = interval.Probability(effective, capacity)
 
 		// A retry below an amount we have proven passes is not a retry
 		// at all, so the ladder does not apply to it.
-		if interval.LowerOK >= amt {
+		if interval.LowerOK >= effective {
 			failedAt = 0
 		}
 	}
@@ -766,6 +806,12 @@ func (p *intervalPaymentSession) ReportAttemptSuccess(_ uint64,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// The HTLC has resolved, so whatever it was holding is no longer held.
+	// The settlement recorded below moves the interval itself, which is how
+	// the liquidity this shard actually spent leaves our picture of the
+	// channel for good.
+	p.releaseRoute(rt)
+
 	p.settledParts++
 
 	for i, key := range p.routeKeys(rt) {
@@ -805,6 +851,9 @@ func (p *intervalPaymentSession) ReportAttemptFailure(_ uint64, rt *route.Route,
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// The HTLC has resolved, so whatever it was holding is no longer held.
+	p.releaseRoute(rt)
 
 	p.failedAttempts++
 
@@ -1076,6 +1125,96 @@ func (p *intervalPaymentSession) recordCapacities(edges []*unifiedEdge,
 
 		from = to
 	}
+}
+
+// holdRoute records what a route we are about to hand out commits on each of
+// its hops, and publishes it to the node wide overlay so that every other
+// payment prices those hops knowing about it.
+//
+// NOTE: the first hop is skipped. The switch already nets our in-flight HTLCs
+// out of the bandwidth it reports for our own links, so counting them here as
+// well would charge the same liquidity twice.
+func (p *intervalPaymentSession) holdRoute(rt *route.Route) {
+	amounts := make(map[IntervalKey]lnwire.MilliSatoshi)
+	for i, key := range p.routeKeys(rt) {
+		if key.From == p.selfNode {
+			continue
+		}
+
+		amounts[key] += intervalHopAmount(rt, i)
+	}
+
+	if len(amounts) == 0 {
+		return
+	}
+
+	p.outstanding = append(p.outstanding, &heldShard{
+		routeKey: intervalRouteKey(rt),
+		amounts:  amounts,
+	})
+
+	p.store.Hold(amounts)
+}
+
+// releaseRoute gives back what one resolved shard was holding. The oldest
+// outstanding shard over the same route is the one released, since shards over
+// an identical route are indistinguishable and resolve in the order they were
+// sent often enough for this to be the better guess.
+func (p *intervalPaymentSession) releaseRoute(rt *route.Route) {
+	routeKey := intervalRouteKey(rt)
+
+	for i, shard := range p.outstanding {
+		if shard.routeKey != routeKey {
+			continue
+		}
+
+		p.outstanding = append(
+			p.outstanding[:i], p.outstanding[i+1:]...,
+		)
+		p.store.Release(shard.amounts)
+
+		return
+	}
+}
+
+// reconcileHolds drops the oldest holds until this session is holding no more
+// shards than the payment has HTLCs in flight.
+//
+// The count comes from the payments database by way of the lifecycle, so it is
+// ground truth, and this is what makes a hold impossible to leak while a
+// payment is running. A route we returned that was never dispatched, because
+// the traffic shaper or the database refused it after we handed it over, leaves
+// a hold behind that no outcome will ever be reported for. Here it is dropped.
+//
+// Dropping the oldest is the safe direction. A hold that lingers depresses a
+// channel for every payment on the node with nothing behind it, while a hold
+// released early only costs us the contention we would have priced in.
+func (p *intervalPaymentSession) reconcileHolds(activeShards uint32) {
+	for len(p.outstanding) > int(activeShards) {
+		stale := p.outstanding[0]
+		p.outstanding = p.outstanding[1:]
+
+		p.store.Release(stale.amounts)
+
+		p.log.Debugf("Released a hold on %d channels with no HTLC "+
+			"behind it", len(stale.amounts))
+	}
+}
+
+// ReleaseAttempts gives back everything this session is still holding. The
+// payment lifecycle calls it on the way out, which is the last moment anybody
+// can, since a session is never reused once its lifecycle has returned.
+//
+// NOTE: Part of the PaymentResultReporter interface.
+func (p *intervalPaymentSession) ReleaseAttempts() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, shard := range p.outstanding {
+		p.store.Release(shard.amounts)
+	}
+
+	p.outstanding = nil
 }
 
 // scoped returns the key a hop of a dispatched route was priced under.

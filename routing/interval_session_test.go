@@ -500,6 +500,7 @@ type recordingSession struct {
 
 	successes []uint64
 	failures  []uint64
+	released  int
 }
 
 // ReportAttemptSuccess records a settled attempt.
@@ -518,6 +519,13 @@ func (r *recordingSession) ReportAttemptFailure(attemptID uint64,
 	_ *route.Route, _ *int, _ lnwire.FailureMessage) {
 
 	r.failures = append(r.failures, attemptID)
+}
+
+// ReleaseAttempts records that the lifecycle told the session it was done.
+//
+// NOTE: Part of the PaymentResultReporter interface.
+func (r *recordingSession) ReleaseAttempts() {
+	r.released++
 }
 
 // TestLifecycleReportsToSession tests that the payment lifecycle hands an

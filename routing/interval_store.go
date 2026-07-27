@@ -105,6 +105,17 @@ type IntervalStore struct {
 	// dirty holds the keys written since the last flush.
 	dirty map[IntervalKey]struct{}
 
+	// held tracks the amounts this node currently has committed on
+	// directed channels through HTLCs it has sent and not yet seen
+	// resolved. It is summed across every payment in flight, so that one
+	// payment prices a corridor knowing what another payment is already
+	// holding on it.
+	//
+	// This is not part of what the store believes about the network and is
+	// never persisted. It records what we are doing to the network right
+	// now, which is knowledge that expires the moment the HTLC does.
+	held map[IntervalKey]lnwire.MilliSatoshi
+
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -120,6 +131,7 @@ func NewIntervalStore(maxEntries int) *IntervalStore {
 	return &IntervalStore{
 		entries:    make(map[IntervalKey]*intervalEntry),
 		maxEntries: maxEntries,
+		held:       make(map[IntervalKey]lnwire.MilliSatoshi),
 		quit:       make(chan struct{}),
 	}
 }
@@ -474,6 +486,62 @@ func (s *IntervalStore) ForEach(cb func(IntervalKey, LiquidityInterval)) {
 	}
 }
 
+// Held returns the amount this node currently has committed on the given
+// directed channel through HTLCs it has sent and not yet seen resolved.
+func (s *IntervalStore) Held(key IntervalKey) lnwire.MilliSatoshi {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.held[key]
+}
+
+// Hold records that we have committed the given amounts, one per directed
+// channel of a route we are about to send over.
+func (s *IntervalStore) Hold(amounts map[IntervalKey]lnwire.MilliSatoshi) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, amt := range amounts {
+		s.held[key] += amt
+	}
+}
+
+// Release gives back amounts recorded by an earlier call to Hold, which the
+// caller makes once the HTLC that committed them has resolved.
+//
+// An amount larger than what is held would mean the caller has released
+// something twice. That must not happen, but if it does we would rather forget
+// a hold than carry a phantom one, because a hold nothing is behind depresses a
+// channel for every payment and nothing but another release can lift it.
+func (s *IntervalStore) Release(amounts map[IntervalKey]lnwire.MilliSatoshi) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, amt := range amounts {
+		current, ok := s.held[key]
+		if !ok {
+			continue
+		}
+
+		if current <= amt {
+			delete(s.held, key)
+
+			continue
+		}
+
+		s.held[key] = current - amt
+	}
+}
+
+// HeldLen returns the number of directed channels currently carrying a hold.
+// It exists so that a test can assert that nothing leaked.
+func (s *IntervalStore) HeldLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.held)
+}
+
 // Clear forgets everything the store has learned. It exists so that an operator
 // can reset the router's beliefs the way mission control's history can be
 // reset.
@@ -481,6 +549,7 @@ func (s *IntervalStore) Clear(ctx context.Context) error {
 	s.mu.Lock()
 
 	s.entries = make(map[IntervalKey]*intervalEntry)
+	s.held = make(map[IntervalKey]lnwire.MilliSatoshi)
 	s.seq = 0
 
 	persister := s.persister

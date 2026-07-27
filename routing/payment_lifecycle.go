@@ -206,6 +206,14 @@ func (p *paymentLifecycle) resumePayment(ctx context.Context) ([32]byte,
 	// return.
 	defer p.stop()
 
+	// This session will never be asked for another route, and no further
+	// outcome will be reported to it, so let it drop whatever it was
+	// tracking on behalf of the attempts it handed out. A route we asked
+	// for but never managed to send is only ever cleaned up here.
+	defer p.reportToSession(func(r PaymentResultReporter) {
+		r.ReleaseAttempts()
+	})
+
 	// If we had any existing attempts outstanding, we'll start by spinning
 	// up goroutines that'll collect their results and deliver them to the
 	// lifecycle loop below.

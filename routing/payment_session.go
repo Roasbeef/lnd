@@ -182,6 +182,13 @@ type PaymentResultReporter interface {
 	// could not be read.
 	ReportAttemptFailure(attemptID uint64, rt *route.Route,
 		failureSourceIdx *int, failure lnwire.FailureMessage)
+
+	// ReleaseAttempts tells the session that its lifecycle has finished and
+	// that no further outcome will be reported to it. A session that tracks
+	// the attempts it handed out needs this, because a route it returned
+	// may never have reached the switch at all, in which case nothing else
+	// would ever tell it so.
+	ReleaseAttempts()
 }
 
 // additionalEdges is the set of ephemeral edges that a payment session knows

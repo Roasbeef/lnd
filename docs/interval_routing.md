@@ -129,6 +129,18 @@ would carry, with an appetite for large shards that responds to how the payment
 is going: bolder once a part has settled and the payment is committed, more
 cautious after several failures.
 
+One shard can get in the next one's way, so the router counts what it is
+already holding. If a shard in flight is holding 200,000 satoshis on some
+interior channel, a second shard of 300,000 needs that channel to have had room
+for 500,000 when the router last looked at it, and that is the amount the model
+is asked about. Folding the hold into the amount is the whole adjustment,
+because every bound the model keeps already answers the question "was there
+this much here". The holds are shared across the node, so a second payment
+steps around the corridor a first payment is using instead of learning about
+the contention by paying for a failed attempt. Our own channels are left out,
+since the switch already subtracts in-flight HTLCs from the bandwidth it
+reports for them.
+
 The payment lifecycle is untouched by any of this. It still asks for one route
 at a time and dispatches one HTLC, or hash time locked contract, at a time. The
 shard size simply rides back on the route, since `registerAttempt` already
@@ -198,6 +210,12 @@ the graph shows more than one channel between a pair, the observation is
 written about the pair instead, at the granularity mission control has always
 used. Pairs with a single channel, which is most of them, keep the full
 resolution.
+
+**A resumed payment's HTLCs are not counted as holds.** After a restart the
+router knows a payment has attempts in flight, because the payments database
+says so, but it did not choose their routes and so cannot say which interior
+channels they sit on. Those shards are priced as though nothing were held,
+which is where the router was before this accounting existed.
 
 **Searching costs more than Dijkstra does.** Every rung of the shard ladder
 runs its own search, and each search may keep up to two dozen labels per node.
