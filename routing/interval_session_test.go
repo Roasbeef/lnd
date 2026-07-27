@@ -3,14 +3,17 @@ package routing
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/htlcswitch"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/tlv"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -487,6 +490,87 @@ func TestIntervalSessionSourceFallback(t *testing.T) {
 	// The empty session is the stock one either way, since it holds no
 	// routing at all.
 	require.IsType(t, &paymentSession{}, source.NewPaymentSessionEmpty())
+}
+
+// recordingSession is a payment session that only records what the payment
+// lifecycle tells it, so that the seam itself can be tested apart from the
+// interval router that needed it.
+type recordingSession struct {
+	PaymentSession
+
+	successes []uint64
+	failures  []uint64
+}
+
+// ReportAttemptSuccess records a settled attempt.
+//
+// NOTE: Part of the PaymentResultReporter interface.
+func (r *recordingSession) ReportAttemptSuccess(attemptID uint64,
+	_ *route.Route) {
+
+	r.successes = append(r.successes, attemptID)
+}
+
+// ReportAttemptFailure records a failed attempt.
+//
+// NOTE: Part of the PaymentResultReporter interface.
+func (r *recordingSession) ReportAttemptFailure(attemptID uint64,
+	_ *route.Route, _ *int, _ lnwire.FailureMessage) {
+
+	r.failures = append(r.failures, attemptID)
+}
+
+// TestLifecycleReportsToSession tests that the payment lifecycle hands an
+// attempt outcome to a session that asked for it, on both the settle and the
+// failure path, and that it does so alongside mission control rather than
+// instead of it.
+func TestLifecycleReportsToSession(t *testing.T) {
+	t.Parallel()
+
+	p, m := newTestPaymentLifecycle(t)
+
+	session := &recordingSession{PaymentSession: m.paySession}
+	p.paySession = session
+
+	preimage := lntypes.Preimage{1}
+	attempt := makeSettledAttempt(t, 10_000, preimage)
+
+	m.clock.On("Now").Return(time.Now())
+
+	// A settled attempt is reported to both mission control and the
+	// session.
+	m.missionControl.On("ReportPaymentSuccess",
+		attempt.AttemptID, &attempt.Route,
+	).Return(nil).Once()
+	m.control.On("SettleAttempt",
+		p.identifier, attempt.AttemptID, mock.Anything,
+	).Return(attempt, nil).Once()
+
+	_, err := p.handleAttemptResult(
+		t.Context(), attempt, &htlcswitch.PaymentResult{
+			Preimage: preimage,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{attempt.AttemptID}, session.successes)
+	require.Empty(t, session.failures)
+
+	// So is a failed one. An unreadable failure reaches mission control
+	// with neither a source nor a message, and the session hears about it
+	// on the same terms.
+	m.missionControl.On("ReportPaymentFail",
+		attempt.AttemptID, &attempt.Route, mock.Anything, mock.Anything,
+	).Return(nil, nil).Once()
+	m.shardTracker.On("CancelShard", attempt.AttemptID).Return(nil).Once()
+	m.control.On("FailAttempt",
+		p.identifier, attempt.AttemptID, mock.Anything,
+	).Return(attempt, nil).Once()
+
+	_, err = p.handleSwitchErr(
+		t.Context(), attempt, htlcswitch.ErrUnreadableFailureMessage,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{attempt.AttemptID}, session.failures)
 }
 
 // TestStockSessionReportsNothing tests that with the interval router switched
