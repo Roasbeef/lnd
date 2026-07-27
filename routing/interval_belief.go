@@ -108,6 +108,20 @@ const (
 	// bound is allowed to say impossible.
 	intervalMaxProbability = 0.999
 	intervalMinProbability = 0.000001
+
+	// intervalRestoredFloor and intervalRestoredCeiling clamp the output of
+	// the model for a belief that was restored from disk rather than
+	// gathered in this process. Neither certainty is available to a belief
+	// that has been asleep: the floor keeps a stale upper bound from ruling
+	// an amount out for good, and the ceiling keeps a stale lower bound from
+	// being trusted as if we had just watched it hold.
+	intervalRestoredFloor   = 0.012
+	intervalRestoredCeiling = 0.95
+
+	// intervalRestoredConfidence is the factor applied to the confidence of
+	// a belief when it is restored, since whatever evidence stood behind it
+	// is now at least one restart old.
+	intervalRestoredConfidence = 0.5
 )
 
 // Liquidity mode classifications. The model does not just carry a probability
@@ -256,6 +270,21 @@ type LiquidityInterval struct {
 
 	// Known is set once any observation has been recorded.
 	Known bool
+
+	// Restored marks a belief that came back from disk rather than from an
+	// attempt this process made. It is cleared by the first fresh
+	// observation, because from that point the bounds describe evidence we
+	// gathered ourselves.
+	Restored bool
+}
+
+// markRestored turns a belief loaded from disk into soft evidence. The bounds
+// are kept, since they are still the best guess anybody has about a channel we
+// have not touched yet, but the confidence behind them is cut and the
+// probability model is told to stop short of certainty in either direction.
+func (l *LiquidityInterval) markRestored() {
+	l.Restored = true
+	l.Confidence *= intervalRestoredConfidence
 }
 
 // normalize restores the invariant 0 <= LowerOK <= Estimate < UpperFail <=
@@ -407,9 +436,7 @@ func (l *LiquidityInterval) lowModeProbability(amt,
 }
 
 // Probability returns the success probability of forwarding the given amount
-// over the channel this interval describes. The branches below are ordered by
-// how much the evidence proves, from a bound we watched hold to a guess we have
-// nothing behind.
+// over the channel this interval describes.
 func (l *LiquidityInterval) Probability(amt,
 	capacity lnwire.MilliSatoshi) float64 {
 
@@ -419,10 +446,49 @@ func (l *LiquidityInterval) Probability(amt,
 		return intervalUnknownCapacity
 	}
 
+	// An amount larger than the channel itself is impossible whatever we
+	// remember about it, so this one zero is never softened below.
 	prior := intervalPrior(amt, capacity)
 	if prior == 0 {
 		return 0
 	}
+
+	probability := l.rawProbability(amt, capacity, prior)
+
+	// A belief we restored from disk describes a network that has had every
+	// chance to move on since we wrote it down. The bounds are still worth
+	// something, which is why we keep them, but they are no longer allowed
+	// to speak with certainty in either direction: a restored upper bound
+	// says unlikely rather than impossible, and a restored lower bound says
+	// likely rather than proven. Without the floor the model has no way back
+	// from a bound that has gone stale, because nothing but an attempt can
+	// revise one and an impossible amount is never attempted.
+	if l.Restored {
+		return math.Min(
+			math.Max(probability, intervalRestoredFloor),
+			intervalRestoredCeiling,
+		)
+	}
+
+	// A bound this process watched hold is the one thing the model is
+	// allowed to call impossible, so it is not floored.
+	if probability == 0 {
+		return 0
+	}
+
+	return math.Min(
+		math.Max(probability, intervalMinProbability),
+		intervalMaxProbability,
+	)
+}
+
+// rawProbability runs the branch table of the model. The branches are ordered
+// by how much the evidence proves, from a bound we watched hold to a guess we
+// have nothing behind. A zero here means the evidence rules the amount out; it
+// is the caller that decides whether the evidence is fresh enough to be
+// believed that far.
+func (l *LiquidityInterval) rawProbability(amt, capacity lnwire.MilliSatoshi,
+	prior float64) float64 {
 
 	var probability float64
 
@@ -481,10 +547,7 @@ func (l *LiquidityInterval) Probability(amt,
 			math.Exp(-over/intervalOverScale)
 	}
 
-	return math.Min(
-		math.Max(probability, intervalMinProbability),
-		intervalMaxProbability,
-	)
+	return probability
 }
 
 // recordProbe records that this direction forwarded the given amount, which we
@@ -519,6 +582,7 @@ func (l *LiquidityInterval) recordProbe(reverse *LiquidityInterval,
 	}
 
 	l.Known = true
+	l.Restored = false
 	l.Confidence = math.Max(l.Confidence, intervalProbeConfidence)
 	l.Successes++
 	if l.Failures > 0 {
@@ -552,6 +616,7 @@ func (l *LiquidityInterval) recordProbe(reverse *LiquidityInterval,
 	}
 
 	reverse.Known = true
+	reverse.Restored = false
 	reverse.Confidence = math.Max(
 		reverse.Confidence, intervalProbeReverseConfidence,
 	)
@@ -594,6 +659,7 @@ func (l *LiquidityInterval) recordFailure(reverse *LiquidityInterval,
 	}
 
 	l.Known = true
+	l.Restored = false
 	l.Confidence = math.Max(l.Confidence, intervalFailureConfidence)
 	l.Failures++
 	l.normalize(capacity)
@@ -621,6 +687,7 @@ func (l *LiquidityInterval) recordFailure(reverse *LiquidityInterval,
 	}
 
 	reverse.Known = true
+	reverse.Restored = false
 	reverse.Confidence = math.Max(
 		reverse.Confidence, intervalFailureReverseConfidence,
 	)
@@ -668,6 +735,7 @@ func (l *LiquidityInterval) recordSettlement(reverse *LiquidityInterval,
 	}
 
 	l.Known = true
+	l.Restored = false
 	l.Confidence = math.Max(l.Confidence, intervalSettleConfidence)
 	l.Successes++
 	if l.Failures > 0 {
@@ -700,6 +768,7 @@ func (l *LiquidityInterval) recordSettlement(reverse *LiquidityInterval,
 	}
 
 	reverse.Known = true
+	reverse.Restored = false
 	reverse.Confidence = math.Max(
 		reverse.Confidence, intervalSettleConfidence,
 	)

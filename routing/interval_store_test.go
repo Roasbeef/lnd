@@ -475,6 +475,112 @@ func TestIntervalStoreIgnoresUninformativeObservations(t *testing.T) {
 	require.Equal(t, testIntervalCapacity, interval.UpperFail)
 }
 
+// TestIntervalStoreRestoreIsSoft tests the one property a restored belief must
+// have. A bound written down before a restart describes a network that has had
+// every chance to move on, and this model has no clock and no way to revise a
+// bound except by attempting the amount. A restored upper bound that returned
+// zero would therefore be permanent: the amount would never be tried again, so
+// the evidence that would correct it could never arrive.
+func TestIntervalStoreRestoreIsSoft(t *testing.T) {
+	t.Parallel()
+
+	capacity := testIntervalCapacity
+	amt := capacity / 2
+
+	// Gather a hard bound the ordinary way, and read it back out the way a
+	// persistence layer would.
+	fresh := NewIntervalStore(0)
+	fresh.RecordFailure(testIntervalKey, amt, capacity)
+	require.Zero(t, fresh.Probability(testIntervalKey, amt, capacity))
+
+	saved := make(map[IntervalKey]LiquidityInterval)
+	fresh.ForEach(func(key IntervalKey, interval LiquidityInterval) {
+		saved[key] = interval
+	})
+	require.Contains(t, saved, testIntervalKey)
+
+	// Hand it to a store that has just started up.
+	restored := NewIntervalStore(0)
+	for key, interval := range saved {
+		restored.Restore(key, interval)
+	}
+
+	interval := restored.Get(testIntervalKey, capacity)
+	require.True(t, interval.Restored)
+	require.Equal(t, saved[testIntervalKey].UpperFail, interval.UpperFail)
+
+	// The bound survived, but it no longer says impossible, so the amount
+	// can be tried again and the belief can be corrected.
+	probability := restored.Probability(testIntervalKey, amt, capacity)
+	require.GreaterOrEqual(t, probability, intervalRestoredFloor)
+	require.Less(t, probability, 0.5)
+
+	// It still says the amount is a bad bet, which is the whole point of
+	// keeping it: a restored bound outranks having no belief at all.
+	require.Less(
+		t, probability,
+		NewIntervalStore(0).Probability(testIntervalKey, amt, capacity),
+	)
+
+	// A restored lower bound is softened from the other side, so a channel
+	// that used to carry an amount is not trusted as if we had just watched
+	// it do so.
+	proven := NewIntervalStore(0)
+	proven.Restore(testIntervalKey, LiquidityInterval{
+		Known: true, LowerOK: amt, Estimate: amt, Confidence: 1,
+	})
+
+	restoredHigh := proven.Probability(testIntervalKey, amt, capacity)
+	require.LessOrEqual(t, restoredHigh, intervalRestoredCeiling)
+	require.Less(t, restoredHigh, intervalProvenProbability)
+
+	// Confidence is cut, because whatever stood behind the belief is at
+	// least one restart old.
+	require.Equal(
+		t, intervalRestoredConfidence,
+		proven.Get(testIntervalKey, capacity).Confidence,
+	)
+}
+
+// TestIntervalStoreFreshEvidenceBeatsRestored tests that a restored belief
+// gives way to an observation this process made, on both sides of the channel.
+func TestIntervalStoreFreshEvidenceBeatsRestored(t *testing.T) {
+	t.Parallel()
+
+	capacity := testIntervalCapacity
+	amt := capacity / 2
+
+	store := NewIntervalStore(0)
+	store.Restore(testIntervalKey, LiquidityInterval{
+		Known: true, UpperFail: amt, Confidence: 1,
+	})
+	require.True(t, store.Get(testIntervalKey, capacity).Restored)
+
+	// Watching the channel carry the amount replaces the restored belief
+	// outright, certainty and all.
+	store.RecordProbe(testIntervalKey, amt, capacity)
+
+	interval := store.Get(testIntervalKey, capacity)
+	require.False(t, interval.Restored)
+	require.Equal(t, amt, interval.LowerOK)
+	require.EqualValues(
+		t, intervalProvenProbability,
+		store.Probability(testIntervalKey, amt, capacity),
+	)
+
+	// The reverse direction was written by the same observation, so it is
+	// no longer restored either.
+	require.False(t, store.Get(testIntervalKey.Reverse(), capacity).Restored)
+
+	// A restore that arrives after we have seen the channel ourselves is
+	// ignored, since what we watched beats what we read back.
+	store.Restore(testIntervalKey, LiquidityInterval{
+		Known: true, UpperFail: 1,
+	})
+	require.False(t, store.Get(testIntervalKey, capacity).Restored)
+	require.Equal(t, amt, store.Get(testIntervalKey, capacity).LowerOK)
+}
+
 // TestIntervalStoreEviction tests that the store stays inside its bound.
 func TestIntervalStoreEviction(t *testing.T) {
 	t.Parallel()

@@ -211,6 +211,44 @@ func (s *IntervalStore) evictLocked() {
 	}
 }
 
+// Restore seeds the store with a belief that was held before this process
+// started. The interval is taken as it was written down, but it is marked as
+// restored, which stops the probability model from treating either of its
+// bounds as a certainty until a fresh observation replaces it.
+//
+// An entry that has already been observed in this process is left alone, since
+// what we have watched ourselves beats anything we read back.
+func (s *IntervalStore) Restore(key IntervalKey,
+	interval LiquidityInterval) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.entries[key]; ok && existing.Known &&
+		!existing.Restored {
+
+		return
+	}
+
+	entry := s.entryLocked(key)
+	entry.LiquidityInterval = interval
+	entry.Known = true
+	entry.markRestored()
+
+	s.evictLocked()
+}
+
+// ForEach hands every belief the store holds to the callback, which is how a
+// persistence layer reads out what needs writing down.
+func (s *IntervalStore) ForEach(cb func(IntervalKey, LiquidityInterval)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, entry := range s.entries {
+		cb(key, entry.LiquidityInterval)
+	}
+}
+
 // Clear forgets everything the store has learned. It exists so that an operator
 // can reset the router's beliefs the way mission control's history can be
 // reset.
