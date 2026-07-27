@@ -124,10 +124,10 @@ var intervalShardMultiples = []lnwire.MilliSatoshi{2, 3, 4, 6, 8}
 // intervalPaymentSession is a PaymentSession that owns route selection and MPP
 // splitting together. Where the stock session asks path finding for the whole
 // remaining amount and halves it when nothing comes back, this one enumerates a
-// ladder of candidate shard sizes, finds a route for each, and picks the pair of
-// shard and route with the best utility. Both halves of that decision read the
-// same liquidity intervals, so a failure at one amount reshapes not just which
-// route is tried next but which amounts are considered at all.
+// ladder of candidate shard sizes, finds a route for each, and picks the best
+// pairing of the two. Both halves of that decision read the same liquidity
+// intervals, so a failure at one amount reshapes not just which route is tried
+// next but which amounts are considered at all.
 type intervalPaymentSession struct {
 	additionalEdges
 
@@ -365,8 +365,8 @@ type intervalShardRequest struct {
 
 // chooseShard prices every rung of the shard ladder and returns the best
 // pairing of shard and route. The second and third return values carry the most
-// informative non-critical error the ladder produced, for the case where no rung
-// produced a route at all.
+// informative non-critical error the ladder produced, for the case where no
+// rung produced a route at all.
 func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 	graph graphdb.NodeTraverser, req *intervalShardRequest) (
 	*intervalChoice, noRouteError, bool, error) {
@@ -405,6 +405,12 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 		source:          p.selfNode,
 		target:          p.payment.Target,
 		finalHtlcExpiry: req.finalHtlcExpiry,
+
+		// Every rung of the ladder walks the same graph, and the graph
+		// session held open around this loop means it cannot change
+		// underneath us, so the reads that do not depend on the amount
+		// are paid for once between all of them.
+		cache: newIntervalGraphCache(),
 	}
 
 	// The appetite for a large shard depends on how the payment is going.
@@ -593,14 +599,16 @@ func intervalCeilDiv(amt lnwire.MilliSatoshi,
 }
 
 // shardAmounts enumerates the shard sizes worth pricing for the given remaining
-// amount. Four sources feed it: the even division of the amount into a number
-// of parts, the halving chain the stock session would walk one step at a time,
-// small multiples of the smallest usable shard, and the amounts this payment has
-// already proven do not fit, divided down until they do.
+// amount. Four sources feed it: the amounts this payment has already proven do
+// not fit, divided down until they do; the even division of the amount into a
+// number of parts; the halving chain the stock session would walk one step at a
+// time; and small multiples of the smallest usable shard.
 //
-// That last source is what makes the ladder a function of the beliefs rather
+// The first source is what makes the ladder a function of the beliefs rather
 // than of the amount alone: a failure at some amount immediately puts shard
-// sizes that sit just under it into play.
+// sizes that sit just under it into play. It is enumerated first because every
+// rung costs a full search, so when the ladder is cut short these are the rungs
+// worth keeping.
 func (p *intervalPaymentSession) shardAmounts(amt,
 	minimum lnwire.MilliSatoshi, partsLeft uint32) []lnwire.MilliSatoshi {
 
@@ -615,10 +623,14 @@ func (p *intervalPaymentSession) shardAmounts(amt,
 
 	var (
 		seen    = make(map[lnwire.MilliSatoshi]struct{})
-		amounts = make([]lnwire.MilliSatoshi, 0, limit)
+		amounts = make([]lnwire.MilliSatoshi, 0, p.cfg.MaxLadderRungs)
 	)
 
 	add := func(shard lnwire.MilliSatoshi) {
+		if len(amounts) >= p.cfg.MaxLadderRungs {
+			return
+		}
+
 		if shard == 0 || shard > amt || shard < minimum {
 			return
 		}
@@ -642,6 +654,16 @@ func (p *intervalPaymentSession) shardAmounts(amt,
 	add(amt)
 	add(minimum)
 
+	for _, failedAt := range p.failedAt {
+		if failedAt <= 1 {
+			continue
+		}
+
+		for _, divisor := range intervalShardDivisors {
+			add((failedAt - 1) / divisor)
+		}
+	}
+
 	for parts := uint32(2); parts <= limit; parts++ {
 		add(intervalCeilDiv(amt, parts))
 	}
@@ -651,16 +673,6 @@ func (p *intervalPaymentSession) shardAmounts(amt,
 
 		if shard == minimum {
 			break
-		}
-	}
-
-	for _, failedAt := range p.failedAt {
-		if failedAt <= 1 {
-			continue
-		}
-
-		for _, divisor := range intervalShardDivisors {
-			add((failedAt - 1) / divisor)
 		}
 	}
 
@@ -819,9 +831,11 @@ func (p *intervalPaymentSession) ReportAttemptFailure(_ uint64, rt *route.Route,
 		}
 	}
 
-	// A failure reported by the final node says nothing about liquidity, so
-	// it is handled as an unattributable one.
-	if failIndex >= len(keys) {
+	// A failure reported by the final node says nothing about the liquidity
+	// of any channel, so there is nothing to bound. An index outside the
+	// route should not be reachable, but a route we cannot index into is
+	// exactly the case where guessing would be worst.
+	if failIndex < 0 || failIndex >= len(keys) {
 		p.recordRouteFailure(rt, keys)
 
 		return
@@ -861,9 +875,9 @@ func (p *intervalPaymentSession) ReportAttemptFailure(_ uint64, rt *route.Route,
 // have already proven carries this amount cannot be the one that refused it.
 //
 // With one suspect left, elimination gives us a certainty for free. With none,
-// something we believe is wrong and we say so with a flat penalty. With several,
-// the suspicion is shared out and counted, and a channel that keeps turning up
-// eventually gets treated as the cause.
+// something we believe is wrong and we say so with a flat penalty. With
+// several, the suspicion is shared out and counted, and a channel that keeps
+// turning up eventually gets treated as the cause.
 func (p *intervalPaymentSession) recordUnattributedFailure(rt *route.Route,
 	keys []IntervalKey) {
 

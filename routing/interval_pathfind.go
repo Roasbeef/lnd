@@ -248,6 +248,37 @@ type intervalPathParams struct {
 
 	// finalHtlcExpiry is the absolute expiry height of the final hop.
 	finalHtlcExpiry int32
+
+	// cache holds the graph reads that do not depend on the amount, so that
+	// every rung of a shard ladder pays for them once between them rather
+	// than once each.
+	cache *intervalGraphCache
+}
+
+// intervalGraphCache holds what a search learns from the graph that does not
+// change with the amount being routed. It is shared by every search of a single
+// call to RequestRoute, which holds a graph session open across all of them, so
+// the graph cannot move underneath it.
+type intervalGraphCache struct {
+	// unifiers holds the channels into a node, keyed by the node they come
+	// from. Building these is the part of the search that touches the graph
+	// database, so caching them is what makes pricing a whole shard ladder
+	// affordable.
+	unifiers map[route.Vertex]map[route.Vertex]*edgeUnifier
+
+	// features holds the validated feature vector of a node, with a nil
+	// entry meaning the node cannot be routed through.
+	features map[route.Vertex]*lnwire.FeatureVector
+}
+
+// newIntervalGraphCache builds an empty cache.
+func newIntervalGraphCache() *intervalGraphCache {
+	return &intervalGraphCache{
+		unifiers: make(
+			map[route.Vertex]map[route.Vertex]*edgeUnifier,
+		),
+		features: make(map[route.Vertex]*lnwire.FeatureVector),
+	}
 }
 
 // findIntervalPath searches for a route from source to target able to deliver
@@ -327,6 +358,11 @@ func findIntervalPath(ctx context.Context, p *intervalPathParams) (
 	absoluteCltvLimit := uint64(p.restrictions.CltvLimit) +
 		uint64(p.finalHtlcExpiry)
 
+	cache := p.cache
+	if cache == nil {
+		cache = newIntervalGraphCache()
+	}
+
 	search := &intervalSearch{
 		params:            p,
 		frontier:          frontier,
@@ -334,10 +370,7 @@ func findIntervalPath(ctx context.Context, p *intervalPathParams) (
 		outgoingChanMap:   outgoingChanMap,
 		additionalEdges:   additionalEdgesWithSrc,
 		absoluteCltvLimit: absoluteCltvLimit,
-		unifiers: make(
-			map[route.Vertex]map[route.Vertex]*edgeUnifier,
-		),
-		features: make(map[route.Vertex]*lnwire.FeatureVector),
+		cache:             cache,
 	}
 
 	best, err := search.run(ctx)
@@ -407,14 +440,9 @@ type intervalSearch struct {
 	additionalEdges   map[route.Vertex][]*edgePolicyWithSource
 	absoluteCltvLimit uint64
 
-	// unifiers caches the incoming edges of a node. The set of channels
-	// into a node does not depend on the amount, so it is only ever built
-	// once even though a node is expanded once per label it keeps.
-	unifiers map[route.Vertex]map[route.Vertex]*edgeUnifier
-
-	// features caches the validated feature vector of a node, with a nil
-	// entry meaning the node cannot be routed through.
-	features map[route.Vertex]*lnwire.FeatureVector
+	// cache holds the graph reads shared with every other search of the
+	// same route request.
+	cache *intervalGraphCache
 
 	expansions int
 }
@@ -650,7 +678,7 @@ func (s *intervalSearch) processEdge(fromNode route.Vertex, edge *unifiedEdge,
 func (s *intervalSearch) incomingEdges(node route.Vertex) (
 	map[route.Vertex]*edgeUnifier, error) {
 
-	if cached, ok := s.unifiers[node]; ok {
+	if cached, ok := s.cache.unifiers[node]; ok {
 		return cached, nil
 	}
 
@@ -676,7 +704,7 @@ func (s *intervalSearch) incomingEdges(node route.Vertex) (
 		)
 	}
 
-	s.unifiers[node] = u.edgeUnifiers
+	s.cache.unifiers[node] = u.edgeUnifiers
 
 	return u.edgeUnifiers, nil
 }
@@ -686,7 +714,7 @@ func (s *intervalSearch) incomingEdges(node route.Vertex) (
 func (s *intervalSearch) nodeFeatures(ctx context.Context,
 	node route.Vertex) (*lnwire.FeatureVector, error) {
 
-	if cached, ok := s.features[node]; ok {
+	if cached, ok := s.cache.features[node]; ok {
 		return cached, nil
 	}
 
@@ -698,17 +726,17 @@ func (s *intervalSearch) nodeFeatures(ctx context.Context,
 	// Do not route through nodes that require features we do not know, or
 	// that fail to set their transitive dependencies.
 	if err := feature.ValidateRequired(features); err != nil {
-		s.features[node] = nil
+		s.cache.features[node] = nil
 
 		return nil, nil
 	}
 	if err := feature.ValidateDeps(features); err != nil {
-		s.features[node] = nil
+		s.cache.features[node] = nil
 
 		return nil, nil
 	}
 
-	s.features[node] = features
+	s.cache.features[node] = features
 
 	return features, nil
 }

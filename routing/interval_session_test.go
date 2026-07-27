@@ -425,6 +425,19 @@ func TestIntervalShardAmounts(t *testing.T) {
 	withEvidence := session.shardAmounts(amt, minimum, 4)
 	require.Contains(t, withEvidence, (failedAt-1)/2)
 	require.NotContains(t, amounts, (failedAt-1)/2)
+
+	// Every rung costs a full search, so the ladder is capped. The rungs
+	// that survive the cap are the ones enumerated first, which are the
+	// whole amount, the smallest usable shard, and the sizes the payment's
+	// own failures put into play.
+	session.cfg.MaxLadderRungs = 3
+	capped := session.shardAmounts(amt, minimum, 4)
+
+	require.Len(t, capped, 3)
+	require.Equal(
+		t, []lnwire.MilliSatoshi{amt, minimum, (failedAt - 1) / 2},
+		capped,
+	)
 }
 
 // TestIntervalSessionSourceFallback tests that the payment shapes the interval

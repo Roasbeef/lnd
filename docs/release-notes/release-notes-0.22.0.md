@@ -59,6 +59,17 @@
 
 ## Functional Enhancements
 
+* A new [experimental interval
+  router](https://github.com/lightningnetwork/lnd/pull/0) can be selected with
+  `routerrpc.router=interval`. It replaces mission control with a liquidity
+  interval per directed channel, bounded below by the largest amount it has
+  watched pass and above by the smallest it has watched fail, with no time decay
+  anywhere. It also plans the size of an MPP shard together with the route that
+  carries it rather than halving its way down after a failure, and it retries a
+  channel at a lower amount rather than stepping around it. The default remains
+  unchanged, and payments to blinded paths are served by the default router
+  regardless of this setting.
+
 ## RPC Additions
 
 * The `routerrpc.EstimateRouteFee` RPC now supports [restricting fee estimates

@@ -45,6 +45,13 @@ const (
 	// consider cutting a payment into, independently of the part limit the
 	// payment itself carries.
 	DefaultIntervalMaxShards = 64
+
+	// DefaultIntervalMaxLadderRungs caps how many candidate shard sizes are
+	// priced for a single route request. Every rung costs a full search, so
+	// this is the knob that decides what one call to RequestRoute costs.
+	// The rungs are enumerated in order of how much they are worth pricing,
+	// so a cap keeps the most informative ones.
+	DefaultIntervalMaxLadderRungs = 16
 )
 
 // IntervalConfig holds the tunables of the interval router. The defaults are
@@ -67,6 +74,10 @@ type IntervalConfig struct {
 	// MaxShards caps the number of pieces the shard ladder considers.
 	MaxShards uint32
 
+	// MaxLadderRungs caps how many candidate shard sizes are priced for a
+	// single route request.
+	MaxLadderRungs int
+
 	// MinShardAmt is the smallest shard the router will send. Below it, a
 	// payment that still cannot be routed is given up on rather than cut
 	// any finer.
@@ -77,12 +88,13 @@ type IntervalConfig struct {
 // validated with.
 func DefaultIntervalConfig() IntervalConfig {
 	return IntervalConfig{
-		MaxRouteHops: DefaultIntervalMaxRouteHops,
-		MaxLabels:    DefaultIntervalMaxLabels,
-		SearchLimit:  DefaultIntervalSearchLimit,
-		AttemptLimit: DefaultIntervalAttemptLimit,
-		MaxShards:    DefaultIntervalMaxShards,
-		MinShardAmt:  DefaultShardMinAmt,
+		MaxRouteHops:   DefaultIntervalMaxRouteHops,
+		MaxLabels:      DefaultIntervalMaxLabels,
+		SearchLimit:    DefaultIntervalSearchLimit,
+		AttemptLimit:   DefaultIntervalAttemptLimit,
+		MaxShards:      DefaultIntervalMaxShards,
+		MaxLadderRungs: DefaultIntervalMaxLadderRungs,
+		MinShardAmt:    DefaultShardMinAmt,
 	}
 }
 
@@ -105,6 +117,9 @@ func (c *IntervalConfig) fillDefaults() {
 	}
 	if c.MaxShards == 0 {
 		c.MaxShards = defaults.MaxShards
+	}
+	if c.MaxLadderRungs <= 0 {
+		c.MaxLadderRungs = defaults.MaxLadderRungs
 	}
 	if c.MinShardAmt == 0 {
 		c.MinShardAmt = defaults.MinShardAmt
