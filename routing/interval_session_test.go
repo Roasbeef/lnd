@@ -475,3 +475,22 @@ func TestIntervalSessionSourceFallback(t *testing.T) {
 	// routing at all.
 	require.IsType(t, &paymentSession{}, source.NewPaymentSessionEmpty())
 }
+
+// TestStockSessionReportsNothing tests that with the interval router switched
+// off, the seam it needed in the payment lifecycle is inert. The stock session
+// does not implement the reporting interface, so the lifecycle's type assertion
+// never fires and every attempt outcome goes to mission control and nowhere
+// else, exactly as it did before.
+func TestStockSessionReportsNothing(t *testing.T) {
+	t.Parallel()
+
+	var session PaymentSession = &paymentSession{}
+
+	_, reports := session.(PaymentResultReporter)
+	require.False(t, reports, "the stock session must stay inert")
+
+	// The interval session is the one that asked for the seam.
+	session = &intervalPaymentSession{}
+	_, reports = session.(PaymentResultReporter)
+	require.True(t, reports)
+}
