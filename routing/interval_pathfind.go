@@ -19,10 +19,10 @@ import (
 // search over the graph tractable, and it is far gentler on a low probability
 // route than dividing by a probability is.
 const (
-	// intervalFeeWeight prices the fee of a hop relative to the amount
-	// being delivered. Expressing the fee term as a fraction of the
-	// delivered amount rather than in absolute millisatoshis keeps the
-	// trade-off between fee and probability the same at every payment size.
+	// intervalFeeWeight sets the fee sensitivity of the search when the
+	// payment carries no fee budget. See intervalFeePricePerNat for what
+	// this number means and for the units it is expressed in, which is the
+	// part of this cost function most worth understanding.
 	intervalFeeWeight = 5.0
 
 	// intervalHopBase and intervalHopGrowth price adding another hop. The
@@ -43,7 +43,65 @@ const (
 	// to keep. The worst by this rank is the one evicted.
 	intervalLabelAmountWeight = 0.10
 	intervalLabelHopWeight    = 0.014
+
+	// intervalBudgetShare is the fraction of a payment's remaining fee
+	// budget it will spend to buy one nat of reliability. Half means a
+	// payment will pay up to half of what it has left to raise the
+	// probability of a route by a factor of e, which leaves the other half
+	// for the hops that follow.
+	intervalBudgetShare = 2.0
+
+	// intervalMinFeePrice and intervalMaxFeePrice bound the budget derived
+	// exchange rate, in millisatoshis per nat. The floor keeps a payment
+	// with almost nothing left from refusing to pay any fee at all, since a
+	// route it can afford is still better than no route. The ceiling keeps a
+	// payment with a very large budget from treating fees as free.
+	intervalMinFeePrice = 30_000.0
+	intervalMaxFeePrice = 420_000.0
 )
+
+// intervalFeePricePerNat returns how many millisatoshis of fee this payment
+// will trade for one nat of log probability. It is the exchange rate between
+// the two things the search is minimizing, and it is where the units of the
+// cost function are decided.
+//
+// The score this rate feeds is denominated in nats: a hop contributes the
+// negative log of its probability, plus its fee converted through this rate.
+// Which way that conversion runs turns out to decide whether a fee budget can
+// ever influence the search at all.
+//
+// The routers this design came from converted fees at a rate proportional to
+// the amount being sent, k times fee over amount with k around 5. Read as a
+// price, that is a willingness to pay amount/k for one nat, which is a fifth of
+// the payment. No realistic fee budget is anywhere near a fifth of the payment,
+// so the fee term never binds and the search prices reliability as though money
+// were free. Measurement bore that out: those routers walk into fee budgets
+// they cannot see, while lnd, whose path finding prices fees in absolute
+// millisatoshis, never violates one.
+//
+// So when the payment has a budget, the budget sets the rate. A payment with
+// 10,000 millisatoshis left will pay 5,000 of them for one nat, which is a
+// price a real route can actually exceed, and the search starts declining
+// expensive reliability on its own rather than discovering the limit when the
+// route is rejected. The rate is absolute, so it tightens in relative terms as
+// the payment grows, which is the right direction: a fee budget quoted in parts
+// per million bites hardest in absolute terms on the largest payments.
+//
+// With no budget there is nothing to derive a rate from, so we fall back to the
+// amount relative rate above, which reproduces the validated behaviour exactly.
+func intervalFeePricePerNat(feeLimit, amt lnwire.MilliSatoshi,
+	weight float64) float64 {
+
+	if feeLimit == lnwire.MaxMilliSatoshi {
+		return math.Max(float64(amt)/weight, 1)
+	}
+
+	price := float64(feeLimit) / intervalBudgetShare
+
+	return math.Min(
+		math.Max(price, intervalMinFeePrice), intervalMaxFeePrice,
+	)
+}
 
 // intervalLabel is one Pareto-incomparable way of reaching the target from a
 // node. The stock path finder keeps a single best distance per node, which is
@@ -188,11 +246,32 @@ func (f *intervalFrontier) insert(label *intervalLabel,
 
 	kept = append(kept, label)
 	if len(kept) > f.maxLabels {
-		worst := 0
-		worstRank := kept[0].rank(deliver)
-
+		// The cheapest label a node holds is kept whatever its score,
+		// because it is the one that survives a binding fee budget. The
+		// amount a label needs to receive is the fee it has accumulated
+		// plus the amount being delivered, so the smallest of those is
+		// the cheapest route out of this node. Without this the frontier
+		// fills with reliable expensive labels and a payment that cannot
+		// afford them is left with nothing to fall back to.
+		cheapest := 0
 		for i := 1; i < len(kept); i++ {
-			if rank := kept[i].rank(deliver); rank > worstRank {
+			if kept[i].netAmountReceived <
+				kept[cheapest].netAmountReceived {
+
+				cheapest = i
+			}
+		}
+
+		worst := -1
+		worstRank := 0.0
+		for i := range kept {
+			if i == cheapest {
+				continue
+			}
+
+			if rank := kept[i].rank(deliver); worst < 0 ||
+				rank > worstRank {
+
 				worst = i
 				worstRank = rank
 			}
@@ -200,7 +279,7 @@ func (f *intervalFrontier) insert(label *intervalLabel,
 
 		// If the label we were handed is the worst of the set, there is
 		// no room for it.
-		if kept[worst] == label {
+		if worst < 0 || kept[worst] == label {
 			return false
 		}
 
@@ -253,6 +332,10 @@ type intervalPathParams struct {
 	// every rung of a shard ladder pays for them once between them rather
 	// than once each.
 	cache *intervalGraphCache
+
+	// feePrice is how many millisatoshis of fee this payment will trade for
+	// one nat of log probability. See intervalFeePricePerNat.
+	feePrice float64
 }
 
 // intervalGraphCache holds what a search learns from the graph that does not
@@ -647,7 +730,7 @@ func (s *intervalSearch) processEdge(fromNode route.Vertex, edge *unifiedEdge,
 	}
 
 	edgeRisk := -math.Log(probability)
-	feePenalty := intervalFeeWeight * fee / math.Max(float64(p.amt), 1)
+	feePenalty := fee / p.feePrice
 	hopPenalty := intervalHopBase +
 		intervalHopGrowth*float64(label.hops)
 

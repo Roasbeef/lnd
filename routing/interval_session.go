@@ -20,8 +20,9 @@ import (
 // route comes back. This session prices every rung of a ladder and takes the
 // best, which is what lets it split before it has failed at all.
 const (
-	// intervalShardFeeWeight prices the fee of a shard relative to the
-	// shard itself.
+	// intervalShardFeeWeight sets the fee sensitivity of the shard score
+	// when the payment carries no fee budget, in the same units and for the
+	// same reasons as intervalFeeWeight. See intervalFeePricePerNat.
 	intervalShardFeeWeight = 4.0
 
 	// intervalShardHopWeight prices each hop of the shard's route, which
@@ -467,6 +468,14 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 	for _, shard := range req.shards {
 		params.amt = shard
 
+		// The budget belongs to the payment, not to the shard, so every
+		// rung is priced against the same remaining limit. What differs
+		// per rung is the fallback rate used when there is no budget at
+		// all, which is a fraction of the shard.
+		params.feePrice = intervalFeePricePerNat(
+			req.restrictions.FeeLimit, shard, intervalFeeWeight,
+		)
+
 		pathEdges, risk, err := findIntervalPath(ctx, params)
 		if err != nil {
 			var routeErr noRouteError
@@ -506,14 +515,27 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 			continue
 		}
 
+		// Never hand out a route the payment cannot afford. The search
+		// prunes on the same limit while it walks, so reaching this is a
+		// sign that the route built from the path costs more than the
+		// path did, and the safe answer is to drop the rung rather than
+		// to spend an HTLC finding out.
+		if fee := rt.TotalAmount - shard; fee > req.restrictions.FeeLimit {
+			p.log.Debugf("Discarding a %v shard whose fee of %v "+
+				"exceeds the remaining budget of %v", shard,
+				fee, req.restrictions.FeeLimit)
+
+			continue
+		}
+
 		choice := &intervalChoice{
 			route: rt,
 			edges: pathEdges,
 			cache: params.cache,
 			shard: shard,
 			utility: intervalUtility(
-				rt, shard, req.maxAmt, req.minimum, risk,
-				appetite,
+				rt, shard, req.maxAmt, req.minimum,
+				req.restrictions.FeeLimit, risk, appetite,
 			),
 		}
 
@@ -539,16 +561,17 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 // intervalUtility prices a shard and the route found for it. The dominant term
 // is the risk of the route, traded against how much of the remaining amount the
 // shard would carry.
-func intervalUtility(rt *route.Route, shard, maxAmt,
-	minimum lnwire.MilliSatoshi, risk, appetite float64) float64 {
+func intervalUtility(rt *route.Route, shard, maxAmt, minimum,
+	feeLimit lnwire.MilliSatoshi, risk, appetite float64) float64 {
 
 	progress := math.Log(math.Max(
 		float64(shard)/math.Max(float64(minimum), 1), 1,
 	))
 
 	fee := rt.TotalAmount - shard
-	feePenalty := intervalShardFeeWeight * float64(fee) /
-		math.Max(float64(shard), 1)
+	feePenalty := float64(fee) / intervalFeePricePerNat(
+		feeLimit, shard, intervalShardFeeWeight,
+	)
 	hopPenalty := intervalShardHopWeight * float64(len(rt.Hops))
 
 	completionBonus := float64(0)
