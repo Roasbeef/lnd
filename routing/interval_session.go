@@ -1001,8 +1001,23 @@ func (p *intervalPaymentSession) recordUnattributedFailure(rt *route.Route,
 		return
 	}
 
+	// How much this one failure implicates any one of its suspects falls
+	// with the number of them, which is also the weight the quarantine
+	// records. Three failures naming two channels each will convict a
+	// channel they agree on; five are needed when each names five.
+	weight := 1 / math.Sqrt(float64(len(suspects)))
+
 	share := intervalSuspicionMass / math.Sqrt(float64(len(suspects)))
 	for _, item := range suspects {
+		// Hold the observation in the store's quarantine, where it
+		// prices as a discount for every payment rather than only for
+		// this one, and where enough agreement across payments turns it
+		// into a bound. Until then it is not allowed to rule anything
+		// out, because we cannot say it happened here.
+		p.store.RecordSuspectFailure(
+			item.key, item.amt, p.capacities[item.key], weight,
+		)
+
 		p.suspects[item.key]++
 		p.penalties[item.key] += share
 

@@ -57,6 +57,24 @@ moved. The forward interval slides down by the amount that left and the reverse
 interval slides up by the same, so the router's picture of the channel tracks
 the payment it just made rather than merely narrowing around it.
 
+### Evidence it does not trust yet
+
+Not every failure says where it happened. An unreadable error, or one no node
+claims, leaves several hops on the route that could each have been the one to
+refuse. Writing an upper bound on all of them would be a claim of certainty
+about channels that may be perfectly healthy, and this model has no way back
+from a bound: an amount it calls impossible is never attempted, so the attempt
+that would clear the mistake never happens.
+
+Such an observation goes into a quarantine instead, held per directed channel
+apart from the bounds. It records the smallest amount an ambiguous failure has
+named and how much corroboration stands behind it, where a failure naming two
+suspects contributes half as much as one naming a single suspect. Quarantined
+evidence prices as a discount on the amount it named and never as an
+impossibility. Once enough independent failures agree on the same channel it is
+promoted into an ordinary upper bound, and the moment the channel carries that
+amount after all, the suspicion is dropped.
+
 ### What it believes with no evidence at all
 
 Before any of that, the router needs an opinion about a channel it has never
@@ -141,6 +159,26 @@ the contention by paying for a failed attempt. Our own channels are left out,
 since the switch already subtracts in-flight HTLCs from the bandwidth it
 reports for them.
 
+What the router will pay for reliability comes from the budget. The score being
+minimized is in nats, so a fee has to be converted into one before it can be
+compared against a probability, and the rate of that conversion is the only
+thing standing between the search and a fee limit. The routers this design came
+from set the rate as a fraction of the amount, which reads as a willingness to
+pay a fifth of the payment to raise a route's probability by a factor of e. No
+budget anybody would set is near that, so the fee term never bound and those
+routers walked into limits they could not see. Here the remaining budget sets
+the rate instead: a payment with 10,000 millisatoshis left will pay 5,000 of
+them for one nat, so it declines expensive reliability on its own rather than
+finding out when the route is refused. The rate is absolute, which means it
+tightens in relative terms as the payment grows, and that is the direction a
+budget quoted in parts per million needs. A payment with no budget keeps the
+old amount relative rate, since there is nothing else to derive one from.
+
+Two smaller rules follow from the same concern. A node always keeps the
+cheapest of its labels whatever that label's score, so a payment that cannot
+afford the reliable routes still finds one it can. And no route is ever handed
+out whose fee exceeds what is left of the budget.
+
 The payment lifecycle is untouched by any of this. It still asks for one route
 at a time and dispatches one HTLC, or hash time locked contract, at a time. The
 shard size simply rides back on the route, since `registerAttempt` already
@@ -211,6 +249,14 @@ written about the pair instead, at the granularity mission control has always
 used. Pairs with a single channel, which is most of them, keep the full
 resolution.
 
+**The quarantine is validated in simulation only.** Promotion after enough
+agreement, and clearing on contradiction, come from a router bred against a
+channel that lies about where failures happen. That router produced the flattest
+degradation profile the work has measured, but it bought the flatness partly by
+never giving up, and none of it has been measured on a real network. The
+quarantine is also held in memory only, since a suspicion restored from disk
+would be one that nothing since had a chance to clear.
+
 **A resumed payment's HTLCs are not counted as holds.** After a restart the
 router knows a payment has attempts in flight, because the payments database
 says so, but it did not choose their routes and so cannot say which interior
@@ -234,7 +280,7 @@ Some are surely fitted to the simulator that produced them.
 
 | File | What is in it |
 |---|---|
-| `routing/interval_belief.go` | the interval and the probability model |
+| `routing/interval_belief.go` | the interval, the quarantine, the model |
 | `routing/interval_store.go` | the node wide store and its flushing |
 | `routing/interval_store_sql.go` | the durable backing |
 | `routing/interval_pathfind.go` | the label setting search |
