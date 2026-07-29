@@ -145,6 +145,7 @@ func MigrateWaitingProofStore(tx kvdb.RwTx) error {
 
 		switch len(k) {
 		case len(legacyWaitingProofKey{}):
+			// Legacy records continue below and are migrated.
 
 		case len(waitingProofKey{}):
 			// The record already uses the typed key format. This

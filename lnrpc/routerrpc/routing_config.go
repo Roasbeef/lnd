@@ -10,6 +10,18 @@ import (
 //
 //nolint:ll
 type RoutingConfig struct {
+	// PaymentRouter selects the routing algorithm used to send payments.
+	// The default router is Dijkstra over a probability estimator, with
+	// mission control behind it and the shard amount halved whenever no
+	// route is found. The interval router replaces all of that with per
+	// directed channel liquidity intervals, and plans the shard amount and
+	// the route together.
+	//
+	// NOTE: this is named PaymentRouter rather than Router because the
+	// router sub server config already carries a Router field holding the
+	// channel router itself.
+	PaymentRouter string `long:"router" choice:"default" choice:"interval" description:"Routing algorithm used to send payments. The interval router is experimental."`
+
 	// ProbabilityEstimatorType sets the estimator to use.
 	ProbabilityEstimatorType string `long:"estimator" choice:"apriori" choice:"bimodal" description:"Probability estimator used for pathfinding." `
 

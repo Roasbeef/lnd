@@ -66,6 +66,21 @@
 
 ## Functional Enhancements
 
+* A new [experimental interval
+  router](https://github.com/lightningnetwork/lnd/pull/0) can be selected with
+  `routerrpc.router=interval`. It replaces mission control with a liquidity
+  interval per directed channel, bounded below by the largest amount it has
+  watched pass and above by the smallest it has watched fail, with no time decay
+  anywhere. It also plans the size of an MPP shard together with the route that
+  carries it rather than halving its way down after a failure, and it retries a
+  channel at a lower amount rather than stepping around it. The default remains
+  unchanged, and payments to blinded paths are served by the default router
+  regardless of this setting. On a node running the native SQL backend the
+  intervals are persisted across restarts; a bound restored from disk is
+  applied as soft evidence with a probability floor, so that a belief which
+  has gone stale can still be corrected by an attempt. The algorithm is
+  explained in [`docs/interval_routing.md`](../interval_routing.md).
+
 ## RPC Additions
 
 * The `routerrpc.EstimateRouteFee` RPC now supports [restricting fee estimates
@@ -130,9 +145,25 @@
   in `SubscribeOnionMessages`, ensuring a nil reply path remains nil in the
   RPC response rather than being emitted as an empty struct.
 
+* [BOLT 12 invoice
+  codec](https://github.com/lightningnetwork/lnd/pull/10941): add the
+  `invoice` TLV message to the `bolt12/` package with structural
+  reader/writer validation. Schnorr signature verification is not yet
+  performed; callers must verify the signature independently until the
+  Merkle and signing primitives land.
+
+* [BOLT 12 invoice_error
+  codec](https://github.com/lightningnetwork/lnd/pull/10958): add the
+  `invoice_error` TLV message to `bolt12/` for onion-message replies.
+
 ## Testing
 
 ## Database
+
+* A new `liquidity_intervals` table
+  [stores](https://github.com/lightningnetwork/lnd/pull/0) the liquidity
+  beliefs of the experimental interval router, so that they survive a restart
+  on nodes running the native SQL backend.
 
 ## Code Health
 

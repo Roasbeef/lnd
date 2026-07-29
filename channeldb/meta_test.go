@@ -621,6 +621,39 @@ func TestFetchMeta(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestFetchMetaMissingDBVersion asserts that metadata with no DB version key is
+// reported as incomplete metadata.
+func TestFetchMetaMissingDBVersion(t *testing.T) {
+	t.Parallel()
+
+	backend, cleanup, err := kvdb.GetTestBackend(t.TempDir(), "cdb")
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	err = kvdb.Update(backend, func(tx kvdb.RwTx) error {
+		_, err := tx.CreateTopLevelBucket(metaBucket)
+
+		return err
+	}, func() {})
+	require.NoError(t, err)
+
+	db := &DB{
+		Backend: backend,
+	}
+
+	_, err = db.FetchMeta()
+	require.ErrorIs(t, err, ErrDBVersionNotFound)
+
+	err = kvdb.View(backend, func(tx kvdb.RTx) error {
+		meta := &Meta{}
+		err := FetchMeta(meta, tx)
+		require.ErrorIs(t, err, ErrDBVersionNotFound)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+}
+
 // TestInitChannelDBCreatesMissingTopLevelBuckets asserts that initialized DBs
 // with missing top-level buckets are repaired during initialization.
 func TestInitChannelDBCreatesMissingTopLevelBuckets(t *testing.T) {
@@ -657,8 +690,8 @@ func TestInitChannelDBCreatesMissingTopLevelBuckets(t *testing.T) {
 }
 
 // TestMissingDBVersionRunsWaitingProofMigration asserts that a DB initialized
-// without a version key is recovered from the last v0.20 mandatory version, so
-// migration 35 rewrites legacy waiting proof records.
+// without a version key is recovered from the last v0.20 mandatory version so
+// migration 35 can migrate legacy waiting proof records.
 func TestMissingDBVersionRunsWaitingProofMigration(t *testing.T) {
 	t.Parallel()
 
@@ -729,6 +762,44 @@ func TestMissingDBVersionRunsWaitingProofMigration(t *testing.T) {
 	require.Equal(t, proof.Key(), migratedProof.Key())
 }
 
+// TestMissingDBVersionRecoveryRequiresBaseline asserts that a missing version
+// key cannot be recovered if the target version list does not include the
+// recovery baseline.
+func TestMissingDBVersionRecoveryRequiresBaseline(t *testing.T) {
+	t.Parallel()
+
+	backend, cleanup, err := kvdb.GetTestBackend(t.TempDir(), "cdb")
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	err = kvdb.Update(backend, func(tx kvdb.RwTx) error {
+		_, err := tx.CreateTopLevelBucket(metaBucket)
+
+		return err
+	}, func() {})
+	require.NoError(t, err)
+
+	db := &DB{
+		Backend: backend,
+	}
+
+	versions := []mandatoryVersion{
+		{
+			number:    0,
+			migration: nil,
+		},
+		{
+			number:    1,
+			migration: nil,
+		},
+	}
+
+	err = db.syncVersions(versions)
+	require.ErrorContains(t, err, "unable to recover missing DB version")
+}
+
+// encodeLegacyWaitingProof encodes a waiting proof using the pre-migration
+// format.
 func encodeLegacyWaitingProof(t *testing.T, isRemote bool,
 	ann *lnwire.AnnounceSignatures1) ([9]byte, []byte) {
 

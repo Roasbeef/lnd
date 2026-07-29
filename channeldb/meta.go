@@ -46,7 +46,7 @@ type Meta struct {
 
 // FetchMeta fetches the metadata from boltdb and returns filled meta structure.
 func (d *DB) FetchMeta() (*Meta, error) {
-	var meta *Meta
+	meta := &Meta{}
 
 	err := kvdb.View(d, func(tx kvdb.RTx) error {
 		return FetchMeta(meta, tx)
@@ -60,46 +60,9 @@ func (d *DB) FetchMeta() (*Meta, error) {
 	return meta, nil
 }
 
-// fetchMetaStrict fetches metadata without interpreting a missing DB version
-// key as the latest version.
-func (d *DB) fetchMetaStrict() (*Meta, error) {
-	var meta *Meta
-
-	err := kvdb.View(d, func(tx kvdb.RTx) error {
-		return fetchMetaStrict(meta, tx)
-	}, func() {
-		meta = &Meta{}
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return meta, nil
-}
-
 // FetchMeta is a helper function used in order to allow callers to re-use a
 // database transaction.
 func FetchMeta(meta *Meta, tx kvdb.RTx) error {
-	metaBucket := tx.ReadBucket(metaBucket)
-	if metaBucket == nil {
-		return ErrMetaNotFound
-	}
-
-	data := metaBucket.Get(dbVersionKey)
-	if data == nil {
-		meta.DbVersionNumber = getLatestDBVersion(dbVersions)
-	} else {
-		meta.DbVersionNumber = byteOrder.Uint32(data)
-	}
-
-	return nil
-}
-
-// fetchMetaStrict fetches the metadata from the DB without interpreting a
-// missing DB version key as the latest version. This should be used by init and
-// migration code that needs to distinguish a fresh DB from a DB with incomplete
-// metadata.
-func fetchMetaStrict(meta *Meta, tx kvdb.RTx) error {
 	metaBucket := tx.ReadBucket(metaBucket)
 	if metaBucket == nil {
 		return ErrMetaNotFound

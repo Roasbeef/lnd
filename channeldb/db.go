@@ -45,10 +45,11 @@ const (
 	dbName = "channel.db"
 
 	// missingDBVersionRecoveryVersion is the latest mandatory DB
-	// version before the v0.20.x releases that could initialize a DB
-	// without writing the DB version key. Starting recovery from this
-	// version allows the v0.21 waiting proof migration to run without
-	// replaying older migrations against a modern DB.
+	// version before the init ordering regression that could create a
+	// DB without writing the DB version key. Affected DBs are therefore
+	// already at least this version, so recovery starts here to run the
+	// v0.21 waiting proof migration without replaying older migrations
+	// against a modern DB.
 	missingDBVersionRecoveryVersion = 33
 )
 
@@ -510,7 +511,7 @@ func initChannelDB(db kvdb.Backend) error {
 		}
 
 		meta := &Meta{}
-		metaErr := fetchMetaStrict(meta, tx)
+		metaErr := FetchMeta(meta, tx)
 
 		for _, tlb := range dbTopLevelBuckets {
 			if _, err := tx.CreateTopLevelBucket(tlb); err != nil {
@@ -519,20 +520,22 @@ func initChannelDB(db kvdb.Backend) error {
 		}
 
 		switch {
+		// Metadata with a DB version already exists. Required
+		// top-level buckets were created above, so init is complete.
 		case metaErr == nil:
 			return nil
 
+		// There is no metadata bucket at all, so this is a fresh DB.
+		// Initialize the DB version after creating the required
+		// top-level buckets.
 		case errors.Is(metaErr, ErrMetaNotFound):
-			// This is a fresh DB, so initialize the DB version
-			// after creating the required top-level buckets.
 			meta.DbVersionNumber = getLatestDBVersion(dbVersions)
 			return putMeta(meta, tx)
 
+		// The DB already has a metadata bucket but no version key.
+		// Leave recovery to the migration path, which can infer a
+		// safe starting version before writing the version key.
 		case errors.Is(metaErr, ErrDBVersionNotFound):
-			// The DB already has a metadata bucket but no
-			// version key. Leave recovery to the migration
-			// path, which can infer a safe starting version
-			// before writing the version key.
 			return nil
 		}
 
@@ -1876,17 +1879,27 @@ func (c *ChannelStateDB) DeleteChannelOpeningState(outPoint []byte) error {
 func (d *DB) syncVersions(versions []mandatoryVersion) error {
 	latestVersion := getLatestDBVersion(versions)
 
-	meta, err := d.fetchMetaStrict()
+	meta, err := d.FetchMeta()
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrMetaNotFound):
 			meta = &Meta{}
 
 		case errors.Is(err, ErrDBVersionNotFound):
-			recoveryVersion := uint32(0)
-			if latestVersion >= missingDBVersionRecoveryVersion {
-				recoveryVersion =
-					missingDBVersionRecoveryVersion
+			recoveryVersion := uint32(
+				missingDBVersionRecoveryVersion,
+			)
+
+			// Missing DB version recovery is only valid for DBs
+			// created after the init ordering regression. Older DBs
+			// wrote the DB version before init returned, so a
+			// missing version key on a sub-33 DB is not a valid
+			// state to infer from.
+			if latestVersion < recoveryVersion {
+				return fmt.Errorf("unable to recover missing "+
+					"DB version key: latest_version=%v "+
+					"recovery_version=%v", latestVersion,
+					recoveryVersion)
 			}
 
 			log.Warnf("DB version key missing, recovering from "+

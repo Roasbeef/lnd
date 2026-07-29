@@ -56,6 +56,7 @@ type Config struct {
 // DefaultConfig defines the config defaults.
 func DefaultConfig() *Config {
 	defaultRoutingConfig := RoutingConfig{
+		PaymentRouter:            routing.DefaultPaymentRouter,
 		ProbabilityEstimatorType: routing.DefaultEstimator,
 		MinRouteProbability:      routing.DefaultMinRouteProbability,
 
@@ -85,6 +86,7 @@ func DefaultConfig() *Config {
 // GetRoutingConfig returns the routing config based on this sub server config.
 func GetRoutingConfig(cfg *Config) *RoutingConfig {
 	return &RoutingConfig{
+		PaymentRouter:            cfg.PaymentRouter,
 		ProbabilityEstimatorType: cfg.ProbabilityEstimatorType,
 		MinRouteProbability:      cfg.MinRouteProbability,
 		AttemptCost:              cfg.AttemptCost,
