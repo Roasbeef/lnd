@@ -1140,7 +1140,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			s.intervalStore.UsePersistence(
 				routing.NewSQLIntervalStore(
 					dbs.NativeSQLStore.GetBaseDB(),
-				), routingConfig.McFlushInterval,
+				), routingConfig.IntervalFlushInterval,
 			)
 		}
 
