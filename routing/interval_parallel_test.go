@@ -19,6 +19,10 @@ type parallelChannel struct {
 	node1    route.Vertex
 	node2    route.Vertex
 	capacity btcutil.Amount
+
+	// baseFee is what the channel charges to forward, which the fee
+	// budget tests need and the rest leave at zero.
+	baseFee lnwire.MilliSatoshi
 }
 
 // parallelGraph is a channel graph that, unlike the mock graph the other tests
@@ -67,6 +71,7 @@ func (g *parallelGraph) ForEachNodeDirectedChannel(_ context.Context,
 					return toNode
 				},
 				ToNodeFeatures: lnwire.EmptyFeatureVector(),
+				FeeBaseMSat:    channel.baseFee,
 			},
 		})
 		if err != nil {
