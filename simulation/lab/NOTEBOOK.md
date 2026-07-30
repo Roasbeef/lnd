@@ -1012,3 +1012,92 @@ where holds contend, econ2 where money is scarce. Nobody owns
 everything, which is itself the strongest argument yet for the
 hybrid the lnd branch builds: evolved beliefs on top of pricing that
 counts.
+
+## 2026-07-29 — exp-027: the flag flip pays the champions' margin
+
+The e2e question got its answer the same day the compose world
+closed: put the interval session inside lnd's real payment lifecycle,
+flip `router_impl=interval` on the simulator's lnd arm, and the
+integrated branch scores 0.788 on mainnet against stock lnd's 0.694
+and mx_c3's 0.791 — the champions' margin, not a fraction of it, on
+all six classic tiers, with attempts landing at 2.5 where the
+champions sit at 2.3. The port is indistinguishable from mx_c3 on
+five tiers and takes split off hb1 outright. It inherits the exp-019
+robustness story nearly whole (stock lnd collapses to 0.240 on the
+degraded hard mix; the integrated branch holds 0.667, inside the
+champion band), and on the mainnet fee rungs it is the best arm in
+the field — champion beliefs with lnd's budget discipline, zero
+violations, exactly the hybrid exp-023 said to build.
+
+Two honest edges. On degraded mainnet the champions lose exactly
+zero success and the port loses 0.040 — its only significant loss to
+a champion anywhere, and precisely the channel the round-3
+quarantine commit targets; the re-bench is live. And at 4000ppm on
+the hard tier the hybrid inherits the paradigm's abandonment rather
+than lnd's persistence, so econ2 keeps its regime. One methodology
+find along the way: mainnet cells were never byte-reproducible on
+any binary (lnd's findPath iterates a map; ties break by memory
+order), so the bit-exact mainnet gate cells in earlier tables were
+luck — the paired stats carried those verdicts, but future gates
+should treat mainnet statistically. Full battery: 804 runs, zero
+errors, gates 24/24 against exp-023.
+
+The round-3 re-bench came back the same evening, and it split the two
+commits cleanly down the middle. The budget-derived fee price is the
+real thing: hard@4000 — the tier round 2 lost — moved +0.079 with the
+only CI-solid round-over-round delta in the sweep, flipping it to
++0.107 over lnd and past every champion, cap-insensitive, with fee
+violations still at zero everywhere. The quarantine is a null on its
+own home turf: no degraded tier moved significantly, and the
+degraded-mainnet gap it was built to close widened to −0.044 against
+mx_c3. Whatever buys the champions their exact zero there, it is not
+suspect-bound discounting — that mystery goes back on the board. And
+the cheapest-label keep, which currently applies budget or no budget,
+shows a cost signature on ood (−0.032) and the no-budget econ
+control; round 4 is a one-line hypothesis: protect the cheapest label
+only when a budget exists. Thirteen of fourteen tiers now CI-solid
+over stock lnd.
+
+The rounds 4-6 chase closed the same night, and it reads like a
+detective story with three wrong suspects. The frontier rule was
+inert (round 4). The IEEE-754 story was real but only explained the
+single-shard tiers (round 5: restoring the verbatim expression fixed
+split/mainnet/atomic to ±0.0005 and left everything that splits
+untouched). The bug underneath was semantic: intervalBudgeted tested
+the REMAINING fee limit, which lnd's lifecycle recomputes every
+route request — the very property we praised when dropping econ2's
+second ledger — so an unbudgeted payment stopped looking unbudgeted
+the moment it paid its first shard's fees. Latch the classification
+at session construction and the adjudication lands: ood back to
+0.5703 against a 0.5702 prediction, budgeted rungs bit-identical,
+and the branch tip at 14/14 CI-solid over stock lnd with zero
+losses.
+
+The best finding of the round is about production, not the bug:
+real lnd payments always carry a fee budget (the RPC layer defaults
+to 5% of the amount), so the branch every real payment takes is the
+budgeted one — and under exactly that default, the margins hold on
+all six classic tiers, the price clamp costs nothing, and NOBODY
+refuses a route, mx_c3 included. Budget discipline separates
+routers only at budgets far tighter than any default node runs.
+exp-023 and exp-025's fee verdicts are tight-budget statements, and
+the sweep now says so. One genuine mystery filed for later:
+unknown-attribution and shift together cost the integrated router
+five times the sum of their separate costs (z=-11.1), and neither
+alone costs anything — an interaction with the quarantine's
+trust boundary as the working suspect.
+
+## 2026-07-30 — exp-028: the give-up attractor is a rule now
+
+code_full2 closed overnight: the compose world seeded from econ2
+itself. The machinery transferred (econ2's composed held-out is
+0.2373 to the hand seed's 0.2157 — budget discipline is worth the
+same +0.022 with the lying channel switched on), but evolution on
+top of it went backwards: the best-val candidate loses to its own
+seed by 0.030 on held-out, all of it success, bought with 4 fewer
+attempts per payment. That is exp-013's shape with every variable
+changed — different seed lineage, different world — which promotes
+the give-up attractor from anecdote to rule: continue any seed at
+the attempt frontier and the search becomes an abandonment machine.
+Escape arm 1 is dead; the 800-eval arm now carries the whole
+compose question.

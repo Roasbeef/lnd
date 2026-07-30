@@ -6,7 +6,7 @@ an in-process payment simulator. NOT tied to the current Dijkstra +
 mission-control paradigm — whole routing algorithms are the candidates.
 
 Read `simulation/lab/NOTEBOOK.md` first for the full story; experiment
-writeups live in `simulation/lab/experiments/` (exp-001…exp-021).
+writeups live in `simulation/lab/experiments/` (exp-001…exp-027).
 
 ## Headline results (all validated, held-out, reproducible)
 
@@ -17,6 +17,7 @@ writeups live in `simulation/lab/experiments/` (exp-001…exp-021).
 | hb1 (evolved) | 0.790 | 2.3 | sharp-bimodal specialist; edges over mx_c3 are family-specific only (exp-020) |
 | **mx_c3 (evolved)** | **0.791** | **2.3** | generalist champion — title DEFENDED (exp-020: split_test 8/0 p=.008; hb1 wins nothing on the original set) |
 | atomic1 (evolved) | 0.790 | 1.6 | flat-liquidity specialist (exp-017 ladder rank 4→1), attempt record, beats a champion under staleness |
+| **interval-lnd (integrated)** | **0.788** | **2.5** | the interval-router branch running INSIDE lnd's payment lifecycle (exp-027, tip 60cce3572): 14/14 tiers CI-solid over stock lnd with zero losses, margins hold under the production default fee limit, best arm in the field on the fee rungs |
 
 - Mainnet = real 12,161-node describegraph snapshot
   (`~/codez/data/mainnet_graph.json`), 100 payments (exp-009). Same
@@ -190,10 +191,53 @@ the corrections to our own published claims, live in
 next.
 
 ### Live
-- Nothing. The tree is FREE — exp-018 completed overnight
-  (2026-07-28); no run holds `routing/` or `cmd/routesim/`.
+- **code_full2** — compose world seeded FROM econ2 (400 evals). TREE
+  LOCKED (`routing/`, `cmd/routesim/`) until it exits.
 
 ### Closed since exp-011 (champions UNCHANGED throughout: hb1 + mx_c3)
+- **exp-027** — the integration benchmark. interval-router@ab1c123ab
+  merged into the sim tree, `router_impl=interval` knob on the lnd
+  arm (mission control still fed; lifecycle seams mirrored), 104/104
+  byte-identity off, gates 24/24 vs exp-023, 804-run battery. The
+  flag flip pays the champions' margin on ALL six classic tiers
+  (mainnet 0.788 vs lnd 0.694 vs mx_c3 0.791; attempts 2.5 vs 2.3),
+  indistinguishable from mx_c3 on 5/6, takes split off hb1. exp-019
+  robustness inherited (degraded hard −0.049 inside the champion
+  band; lnd −0.253). Hybrid thesis CONFIRMED on mainnet fee rungs
+  (best arm in field, zero budget violations both rungs) and REFUTED
+  on hard@4000 (inherits the paradigm's abandonment; econ2 keeps that
+  regime). One gap: degraded mainnet −0.040 success where champions
+  lose exactly 0.000. Round-3 re-bench (paired vs round-2 raws):
+  budget pricing CONFIRMED — hard@4000 +0.079 (the only CI-solid
+  r3-vs-r2 delta), tier flips to +0.107 over lnd and beats every
+  champion there, cap-insensitive, zero fee violations everywhere;
+  quarantine NULL on its home turf (deg-mainnet gap widened to
+  −0.044 vs mx_c3 CI-solid — suspect discounting is measurably not
+  what buys the champions' zero). Rounds 4-6 ran the ood −0.032
+  regression to ground through three falsified hypotheses (frontier
+  rule inert; IEEE-754 non-equivalence real but single-shard-only)
+  to the actual bug: intervalBudgeted tested the REMAINING limit,
+  which is never the sentinel after shard one, so every unbudgeted
+  payment that split was misclassified budgeted. Fix latches
+  budgetedness at session construction (60cce3572). FINAL: 14/14
+  tiers CI-solid over stock lnd, ZERO losses (4W/1L vs hb1, 3W/5L vs
+  mx_c3, owns all three fee rungs vs the whole field); hard@4000
+  holds 0.410; ood restored to 0.5703 (prediction 0.5702).
+  PRODUCTION-DEFAULT battery (real nodes always carry a budget —
+  lnrpc falls back to DefaultRoutingFeeLimitForAmount = 5%): margins
+  hold on all six classic tiers CI-solid, the 420k msat/nat clamp
+  costs ≤0.0095, zero refusals for every arm incl. mx_c3 — so the
+  exp-023/025 fee findings are TIGHT-budget statements, not
+  default-node ones. Open finding filed: deg_hard_mix interaction
+  (unknown×shift costs 5x the sum of the parts, z=−11.1; hypothesis:
+  quarantine loses ground when failures name the WRONG channel).
+  Methodology self-corrections: mainnet cells NEVER
+  byte-reproducible on any binary (findPath map iteration), so
+  bit-exact mainnet gate cells in exp-023/025 were luck; the
+  interval arm is not run-to-run reproducible either (same class,
+  more state) — replicate protocol required, noise floors recorded;
+  algebraic identity is NOT float identity when comparisons are
+  exact.
 - **exp-026** — the compose world holds. First breed under economics
   AND the lying channel together: an honest defeat (8 pool accepts,
   all attempting the full budget+inbound+reservations synthesis,
@@ -417,20 +461,20 @@ next.
   trying without changing WHAT it retries. Estimator worth ≤0.02 of
   objective; paradigm worth 0.18–0.22.
 
-### Next, in priority order
-1. **Upstream PR prep for soft_unknown** — extract the exp-021 Part B
-   diff, strip fork-specific comments, port the evidence chain
-   (exp-019 pathology, exp-021 recovery table) into a PR narrative.
-   Known limitation to state: the min-probability hop choice needs
-   capacity threading before it works under the bimodal estimator.
-2. Offline replay on real payment data — replay both belief systems
-   over a real node's historical attempt stream, score predictive
-   log-loss. No simulator in the loop; the escape from
-   "simulator-shaped."
-3. Plan-time distillation (the hard half): success-side memory
-   feeding initial amount choice + joint route-set construction —
-   priced as an architectural change after exp-021 measured the
-   reactive half null.
-4. Upstream the gepa meta_harness JSON fix (merged durable into
-   `~/codez/gepa` main at 7c20d98c; the upstream PR to gepa-ai/gepa
-   remains). The ceiling arm is DONE (exp-024).
+### Next, in priority order (user directives 2026-07-30)
+**The ship target is the interval router in the next lnd major
+release** — the soft_unknown PR is DROPPED (user: doesn't move the
+needle); everything funnels toward the integration branch.
+1. Realistic-graph loader flag (`routing/sim_load.go` reads the
+   per-edge `balance` field) → exp-029 foreign-balance-sheet sweep
+   on `~/codez/data/realistic_graph.json` — the first liquidity
+   family we did not author.
+2. compose-800: the second pre-registered exp-026 escape (hand seed,
+   800 evals on corpus-full). If it fails too, the compose world is
+   closed at any seed and budget.
+3. Dashboard v65: exp-027 (14/14 + production-default), exp-028
+   (give-up rule), exp-029 when it lands.
+4. Offline replay on real payment data — NEXT WEEK per user (needs
+   node access).
+5. Plan-time distillation (the hard half) — priced as architectural.
+6. Upstream the gepa meta_harness JSON fix to gepa-ai/gepa.
