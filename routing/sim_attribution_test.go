@@ -96,7 +96,8 @@ func attributionRunner(t *testing.T,
 		spec *SimPaymentSpec) (SimRouter, error) {
 
 		inner, err := newLndStackRouter(
-			view, runner.mc, runner.params, src, balances, spec,
+			view, runner.mc, runner.intervalStore,
+			runner.params, src, balances, spec,
 		)
 		if err != nil {
 			return nil, err
@@ -240,8 +241,8 @@ func TestSimAttributionUnknownLndPath(t *testing.T) {
 		FeeLimitMsat: lnwire.MaxMilliSatoshi,
 	}
 	router, err := newLndStackRouter(
-		&simGossipView{g: graph}, runner.mc, runner.params, source,
-		graph.LocalBalances(source), spec,
+		&simGossipView{g: graph}, runner.mc, runner.intervalStore,
+		runner.params, source, graph.LocalBalances(source), spec,
 	)
 	require.NoError(t, err)
 

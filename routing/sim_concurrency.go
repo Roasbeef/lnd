@@ -946,6 +946,14 @@ func (s *simScheduler) finish(p *simLivePayment) {
 	p.held = nil
 	p.state = simPaymentDone
 
+	// Tell the router its payment is over, if it asked to be told. A router
+	// that reserves anything outside itself, an interval session holding
+	// liquidity against a route it may never have sent, has no other moment
+	// to give it back in.
+	if finisher, ok := p.router.(simRouterFinisher); ok {
+		finisher.FinishPayment()
+	}
+
 	// What the payment took in wall time, which is every attempt it made
 	// plus the waiting between them. A payment that gave up before it sent
 	// anything took no time at all, and that zero is reported rather than
@@ -981,6 +989,10 @@ func (s *simScheduler) abandon() {
 			s.r.graph.ReleaseHold(id)
 		}
 		p.holdIDs = nil
+
+		if finisher, ok := p.router.(simRouterFinisher); ok {
+			finisher.FinishPayment()
+		}
 	}
 	s.live = nil
 }

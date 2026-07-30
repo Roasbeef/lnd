@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
 
@@ -69,6 +70,26 @@ type SimBalanceRefresher interface {
 	// replacement for the map they were built with rather than as
 	// additional evidence: it is the same measurement, taken later.
 	RefreshLocalBalances(balances map[uint64]lnwire.MilliSatoshi)
+}
+
+// simRouterFinisher is the optional half of the SimRouter contract that a
+// router implements if it needs to be told that its payment is over.
+//
+// A router is built per payment and nothing in the SimRouter interface says
+// when that payment ends, which is fine for a router whose whole state dies
+// with it. It is not fine for one that reserves something outside itself: a
+// route it was asked for but that never reached the wire is only ever cleaned
+// up here. lnd's own lifecycle has exactly this seam, a deferred
+// ReleaseAttempts on the way out of resumePayment, and this is where the
+// simulator puts it.
+//
+// It is deliberately unexported. It is a property of the two sessions lnd
+// ships rather than of the candidate contract, and no candidate router has ever
+// been asked for it.
+type simRouterFinisher interface {
+	// FinishPayment is called once, when the payment stops, whether it
+	// settled, failed or gave up before it sent anything.
+	FinishPayment()
 }
 
 // SimPaymentSpec describes one payment for a router to complete.
@@ -202,8 +223,15 @@ type SimRouterFactory func(view SimNetworkView, source route.Vertex,
 // stack to the SimRouter interface. It is both the default router and the
 // baseline any candidate algorithm must beat.
 type lndStackRouter struct {
-	session *paymentSession
+	session PaymentSession
 	mc      *MissionControl
+
+	// reporter is the session's own ear on the attempts it handed out, set
+	// when the session keeps a belief state of its own and nil otherwise.
+	// It mirrors paymentLifecycle.reportToSession: a session that does not
+	// implement PaymentResultReporter, the stock one among them, never
+	// hears about its attempts at all.
+	reporter PaymentResultReporter
 
 	// feeLimit is the payment's whole fee budget, lnwire.MaxMilliSatoshi
 	// when the scenario named none.
@@ -225,8 +253,15 @@ type lndStackRouter struct {
 // newLndStackRouter builds the baseline router from the given tunables. The
 // mission control instance persists across payments of a scenario batch,
 // carrying learned pair history exactly like a long-running node.
+//
+// The session it drives is the stock one unless the params named the interval
+// router, in which case store is the node wide belief the interval sessions
+// share. Everything around the session is identical either way, which is the
+// point of putting the knob here: mission control is still built, still fed
+// every outcome, and still the thing that declares a payment terminally
+// failed, exactly as it is on a node running the interval router for real.
 func newLndStackRouter(view SimNetworkView, mc *MissionControl,
-	params *SimParams, source route.Vertex,
+	store *IntervalStore, params *SimParams, source route.Vertex,
 	localBalances map[uint64]lnwire.MilliSatoshi,
 	spec *SimPaymentSpec) (SimRouter, error) {
 
@@ -239,19 +274,42 @@ func newLndStackRouter(view SimNetworkView, mc *MissionControl,
 		return &simBandwidthHints{balances: localBalances}, nil
 	}
 
-	session, err := newPaymentSession(
-		payment, source, getBandwidthHints, view, mc,
-		params.pathFindingConfig(),
-	)
+	var session PaymentSession
+	switch {
+	case params.intervalRouter():
+		if store == nil {
+			return nil, fmt.Errorf("interval router selected " +
+				"without a belief store")
+		}
+
+		session, err = newIntervalPaymentSession(
+			payment, source, getBandwidthHints, view, store,
+			DefaultIntervalConfig(),
+		)
+
+	default:
+		session, err = newPaymentSession(
+			payment, source, getBandwidthHints, view, mc,
+			params.pathFindingConfig(),
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	return &lndStackRouter{
+	router := &lndStackRouter{
 		session:  session,
 		mc:       mc,
 		feeLimit: spec.FeeLimitMsat,
-	}, nil
+	}
+
+	// The same type assertion the payment lifecycle makes, at the same
+	// point in the payment's life: once, when the session is built.
+	if reporter, ok := session.(PaymentResultReporter); ok {
+		router.reporter = reporter
+	}
+
+	return router, nil
 }
 
 // RequestRoute delegates to the payment session, which runs the production
@@ -290,7 +348,19 @@ func (l *lndStackRouter) ReportAttempt(attemptID uint64, rt *route.Route,
 		// both, so this side has to as well.
 		l.feesPaid += rt.TotalFees()
 
-		return l.mc.ReportPaymentSuccess(attemptID, rt)
+		if err := l.mc.ReportPaymentSuccess(attemptID, rt); err != nil {
+			return err
+		}
+
+		// If the session keeps a belief state of its own, it needs the
+		// same observation mission control just received. This is
+		// handleAttemptResult's order: mission control first, then the
+		// session.
+		if l.reporter != nil {
+			l.reporter.ReportAttemptSuccess(attemptID, rt)
+		}
+
+		return nil
 	}
 
 	// An unattributed failure is reported the way lnd's own switch reports
@@ -309,12 +379,20 @@ func (l *lndStackRouter) ReportAttempt(attemptID uint64, rt *route.Route,
 	// A non-nil final result means mission control considers the payment
 	// terminally failed. Latch it so that the next RequestRoute call
 	// fails, ending the payment loop.
-	finalResult, err := l.mc.ReportPaymentFail(
-		attemptID, rt,
-		getNodeIndexSim(rt, result.FailureSource), failure,
-	)
+	srcIdx := getNodeIndexSim(rt, result.FailureSource)
+	finalResult, err := l.mc.ReportPaymentFail(attemptID, rt, srcIdx, failure)
 	if err != nil {
 		return err
+	}
+
+	// If the session keeps a belief state of its own, it needs the same
+	// observation mission control just received: the same source index and
+	// the same message, unread ones included. This is reportAndFail's
+	// order, and it runs whether or not mission control called the payment
+	// terminally failed, because handleSwitchErr reports to the session
+	// before it looks at the reason.
+	if l.reporter != nil {
+		l.reporter.ReportAttemptFailure(attemptID, rt, srcIdx, failure)
 	}
 
 	if finalResult != nil {
@@ -322,6 +400,22 @@ func (l *lndStackRouter) ReportAttempt(attemptID uint64, rt *route.Route,
 	}
 
 	return nil
+}
+
+// FinishPayment tells the session that its payment is over and that no further
+// outcome will be reported to it, so that it can give back whatever the
+// attempts it handed out are still holding. It is the simulator's stand-in for
+// the deferred ReleaseAttempts in paymentLifecycle.resumePayment, and it lands
+// at the same point in the payment's life: after the last report, on every
+// path out including the ones that never sent anything.
+//
+// NOTE: Part of the simRouterFinisher interface.
+func (l *lndStackRouter) FinishPayment() {
+	if l.reporter == nil {
+		return
+	}
+
+	l.reporter.ReleaseAttempts()
 }
 
 // newSimLightningPayment constructs the LightningPayment describing one

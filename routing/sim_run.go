@@ -45,6 +45,35 @@ type SimParams struct {
 	// routers into lnd's own payment loop. Both knobs default to off, in
 	// which case the lnd arm is the stock production stack.
 	Patch SimPatchParams `json:"patch,omitempty"`
+
+	// RouterImpl selects which payment session the lnd arm runs, by the
+	// same names lnd's own config uses: "default" (or the empty string,
+	// which is what every params file written before this knob existed
+	// produces) is the stock session behind mission control, and
+	// "interval" is the interval router. Everything else in this struct
+	// still applies under either one, because the interval session shares
+	// the arm's mission control reporting: it is an addition to the belief
+	// state, not a replacement for the plumbing.
+	RouterImpl string `json:"router_impl,omitempty"`
+}
+
+// intervalRouter reports whether the params ask the lnd arm to run the
+// interval router rather than the stock session.
+func (p *SimParams) intervalRouter() bool {
+	return p.RouterImpl == IntervalPaymentRouter
+}
+
+// validateRouterImpl rejects a router name the arm does not know, rather than
+// silently running the stock stack under a misspelled knob and reporting the
+// number as the other router's.
+func (p *SimParams) validateRouterImpl() error {
+	switch p.RouterImpl {
+	case "", DefaultPaymentRouter, IntervalPaymentRouter:
+		return nil
+
+	default:
+		return fmt.Errorf("unknown router_impl %q", p.RouterImpl)
+	}
 }
 
 // SimPatchParams mirrors PatchConfig in the params JSON.
@@ -285,6 +314,17 @@ type SimRunner struct {
 	mcc    *MissionController
 	params *SimParams
 
+	// intervalStore is the node wide liquidity belief of the interval
+	// router, nil unless the params selected it. It sits here rather than
+	// inside the per-payment router for the same reason mission control
+	// does: what one payment learns is only worth anything if the next one
+	// still has it.
+	//
+	// It is memory only. The store's SQL persister is an optional
+	// attachment on a node with a native SQL backend, and a simulator run
+	// has no database and no next process to load beliefs into.
+	intervalStore *IntervalStore
+
 	// routerFactory builds the routing strategy under test, once per
 	// payment. Defaults to the lnd production stack.
 	routerFactory SimRouterFactory
@@ -370,6 +410,10 @@ func NewSimRunner(graph *SimGraph, params *SimParams, source route.Vertex,
 		return nil, fmt.Errorf("source node %v not in graph", source)
 	}
 
+	if err := params.validateRouterImpl(); err != nil {
+		return nil, err
+	}
+
 	estimator, err := params.buildEstimator()
 	if err != nil {
 		return nil, err
@@ -415,14 +459,24 @@ func NewSimRunner(graph *SimGraph, params *SimParams, source route.Vertex,
 		return nil, err
 	}
 
+	// The interval router's belief store is built here, once, so that every
+	// payment of the batch reads and writes the same one. A run that did
+	// not ask for the interval router builds nothing, which is what keeps
+	// the stock arm untouched.
+	var intervalStore *IntervalStore
+	if params.intervalRouter() {
+		intervalStore = NewIntervalStore(0)
+	}
+
 	runner := &SimRunner{
-		graph:   graph,
-		source:  source,
-		mc:      mc,
-		mcc:     mcController,
-		params:  params,
-		clk:     clock.NewDefaultClock(),
-		cleanup: cleanup,
+		graph:         graph,
+		source:        source,
+		mc:            mc,
+		mcc:           mcController,
+		params:        params,
+		intervalStore: intervalStore,
+		clk:           clock.NewDefaultClock(),
+		cleanup:       cleanup,
 	}
 
 	// The default routing strategy is lnd's production stack; candidate
@@ -432,7 +486,8 @@ func NewSimRunner(graph *SimGraph, params *SimParams, source route.Vertex,
 		spec *SimPaymentSpec) (SimRouter, error) {
 
 		return newLndStackRouter(
-			view, mc, params, src, localBalances, spec,
+			view, mc, intervalStore, params, src, localBalances,
+			spec,
 		)
 	}
 
