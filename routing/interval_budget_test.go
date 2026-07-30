@@ -107,31 +107,25 @@ func newBudgetSession(t *testing.T) (*intervalPaymentSession, IntervalKey) {
 	return session, proven
 }
 
-// TestIntervalFeePricePerNat tests the exchange rate that decides whether a fee
+// TestIntervalBudgetPrice tests the exchange rate that decides whether a fee
 // budget can influence the search at all. The units are the finding here: a
 // rate proportional to the amount can never be reached by a realistic budget,
 // while an absolute rate can.
-func TestIntervalFeePricePerNat(t *testing.T) {
+func TestIntervalBudgetPrice(t *testing.T) {
 	t.Parallel()
 
 	amt := lnwire.MilliSatoshi(1_000_000_000)
 
-	// With no budget the rate is a fraction of the amount, which reproduces
-	// the behaviour this design was validated with.
-	noBudget := intervalFeePricePerNat(
-		lnwire.MaxMilliSatoshi, amt, intervalFeeWeight,
-	)
-	require.Equal(t, float64(amt)/intervalFeeWeight, noBudget)
-
-	// Read as a price that is a fifth of the payment, which no fee budget
-	// anybody would set comes close to. That is the whole reason it never
-	// binds.
-	require.Greater(t, noBudget, float64(amt)/10)
+	// A payment with no budget has no rate. It prices fees off the amount
+	// instead, which intervalFeePenalty does directly.
+	require.Zero(t, intervalBudgetPrice(lnwire.MaxMilliSatoshi))
 
 	// With a budget the rate is absolute and derived from what is left.
 	budget := lnwire.MilliSatoshi(400_000)
-	priced := intervalFeePricePerNat(budget, amt, intervalFeeWeight)
-	require.Equal(t, float64(budget)/intervalBudgetShare, priced)
+	require.Equal(
+		t, float64(budget)/intervalBudgetShare,
+		intervalBudgetPrice(budget),
+	)
 
 	// The rate falls as the budget is spent, so a payment running low
 	// prices reliability ever more cheaply and stops paying up for it.
@@ -139,31 +133,98 @@ func TestIntervalFeePricePerNat(t *testing.T) {
 	for _, left := range []lnwire.MilliSatoshi{
 		800_000, 400_000, 200_000, 120_000,
 	} {
-		current := intervalFeePricePerNat(left, amt, intervalFeeWeight)
+		current := intervalBudgetPrice(left)
 		require.Less(t, current, previous)
 		previous = current
 	}
 
 	// The rate is bounded at both ends. A payment with almost nothing left
 	// still pays something, since a route it can afford beats no route.
+	require.Equal(t, intervalMinFeePrice, intervalBudgetPrice(1))
 	require.Equal(
-		t, intervalMinFeePrice,
-		intervalFeePricePerNat(1, amt, intervalFeeWeight),
-	)
-	require.Equal(
-		t, intervalMaxFeePrice, intervalFeePricePerNat(
-			lnwire.MaxMilliSatoshi-1, amt, intervalFeeWeight,
-		),
+		t, intervalMaxFeePrice,
+		intervalBudgetPrice(lnwire.MaxMilliSatoshi-1),
 	)
 
 	// Because the rate is absolute, its ceiling in relative terms tightens
 	// as the payment grows, which is the direction a budget quoted in parts
 	// per million needs.
-	small := lnwire.MilliSatoshi(1_000_000)
-	large := lnwire.MilliSatoshi(1_000_000_000)
-	rate := intervalFeePricePerNat(budget, 0, intervalFeeWeight)
+	rate := intervalBudgetPrice(budget)
+	require.Greater(
+		t, rate/float64(lnwire.MilliSatoshi(1_000_000)),
+		rate/float64(amt),
+	)
 
-	require.Greater(t, rate/float64(small), rate/float64(large))
+	// Read as a price, the unbudgeted fallback is a fifth of the payment,
+	// which no fee budget anybody would set comes close to. That is the
+	// whole reason it never binds.
+	unbudgeted := intervalFeePenalty(1, amt, intervalFeeWeight, 0)
+	require.Less(t, unbudgeted, 1/(float64(amt)/10))
+}
+
+// TestIntervalFeePenaltyUnbudgetedIsVerbatim tests that the fee term of an
+// unbudgeted payment is bit for bit the expression it has always been.
+//
+// This is a stricter test than it looks. The obvious refactor, precomputing
+// the amount over the weight and dividing the fee by that, is algebraically
+// the same and not the same in floating point, because it rounds twice where
+// the original rounds once. The frontier compares these scores exactly, so a
+// last-bit difference reorders labels and returns a different route. It was
+// measured at 0.032 of objective on one tier. Equality here is therefore
+// asserted on the bits, and the second half proves the assertion can fail.
+func TestIntervalFeePenaltyUnbudgetedIsVerbatim(t *testing.T) {
+	t.Parallel()
+
+	amounts := []lnwire.MilliSatoshi{
+		0, 1, 4, 5, 6, 1_000_000, 7_000_003, 33_333_337,
+		100_000_000, 123_456_789, 200_000_000,
+	}
+	fees := []lnwire.MilliSatoshi{
+		0, 1, 3, 997, 100_000, 262_144, 499_999, 500_000,
+	}
+	weights := []float64{intervalFeeWeight, intervalShardFeeWeight}
+
+	// reciprocal is the form this must never be written as.
+	reciprocal := func(fee float64, amt lnwire.MilliSatoshi,
+		weight float64) float64 {
+
+		return fee / math.Max(float64(amt)/weight, 1)
+	}
+
+	var differs int
+	for _, weight := range weights {
+		for _, amt := range amounts {
+			for _, feeAmt := range fees {
+				fee := float64(feeAmt)
+
+				want := weight * fee /
+					math.Max(float64(amt), 1)
+				got := intervalFeePenalty(fee, amt, weight, 0)
+
+				require.Equal(t, math.Float64bits(want),
+					math.Float64bits(got),
+					"amt=%v fee=%v weight=%v", amt, feeAmt,
+					weight)
+
+				if reciprocal(fee, amt, weight) != want {
+					differs++
+				}
+			}
+		}
+	}
+
+	// The reciprocal form disagrees on a good fraction of these, which is
+	// what makes the equality above worth asserting rather than a ritual.
+	require.NotZero(t, differs, "the sweep found no case where the "+
+		"reciprocal form differs, so it cannot catch the regression")
+
+	// A payment with a budget takes the other branch and pays the rate the
+	// budget sets.
+	price := intervalBudgetPrice(400_000)
+	require.Equal(
+		t, 1_000/price,
+		intervalFeePenalty(1_000, 100_000_000, intervalFeeWeight, price),
+	)
 }
 
 // TestIntervalBudgetPicksCheapCorridor tests that a binding budget changes the
@@ -315,18 +376,18 @@ func TestIntervalFrontierKeepsCheapestLabel(t *testing.T) {
 	}
 }
 
-// TestIntervalKeepCheapest tests the switch that decides which of the two
-// eviction rules a search uses. Anything short of the sentinel is a real limit
-// a route can exceed, so anything short of it turns the protection on.
-func TestIntervalKeepCheapest(t *testing.T) {
+// TestIntervalBudgeted tests the switch that decides both how fees are priced
+// and which of the two eviction rules a search uses. Anything short of the
+// sentinel is a real limit a route can exceed, so anything short of it counts.
+func TestIntervalBudgeted(t *testing.T) {
 	t.Parallel()
 
-	require.False(t, intervalKeepCheapest(lnwire.MaxMilliSatoshi))
+	require.False(t, intervalBudgeted(lnwire.MaxMilliSatoshi))
 
 	for _, limit := range []lnwire.MilliSatoshi{
 		0, 1, budgetHopFee, lnwire.MaxMilliSatoshi - 1,
 	} {
-		require.True(t, intervalKeepCheapest(limit),
+		require.True(t, intervalBudgeted(limit),
 			"a limit of %v should price fees", limit)
 	}
 }

@@ -22,7 +22,7 @@ import (
 const (
 	// intervalShardFeeWeight sets the fee sensitivity of the shard score
 	// when the payment carries no fee budget, in the same units and for the
-	// same reasons as intervalFeeWeight. See intervalFeePricePerNat.
+	// same reasons as intervalFeeWeight. See intervalFeePenalty.
 	intervalShardFeeWeight = 4.0
 
 	// intervalShardHopWeight prices each hop of the shard's route, which
@@ -465,16 +465,14 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 		found   bool
 	)
 
+	// The budget belongs to the payment rather than to any one shard, so
+	// every rung is priced against the same rate. A payment with no budget
+	// gets a zero here and the search prices its fees off the amount
+	// instead.
+	params.feePrice = intervalBudgetPrice(req.restrictions.FeeLimit)
+
 	for _, shard := range req.shards {
 		params.amt = shard
-
-		// The budget belongs to the payment, not to the shard, so every
-		// rung is priced against the same remaining limit. What differs
-		// per rung is the fallback rate used when there is no budget at
-		// all, which is a fraction of the shard.
-		params.feePrice = intervalFeePricePerNat(
-			req.restrictions.FeeLimit, shard, intervalFeeWeight,
-		)
 
 		pathEdges, risk, err := findIntervalPath(ctx, params)
 		if err != nil {
@@ -569,8 +567,9 @@ func intervalUtility(rt *route.Route, shard, maxAmt, minimum,
 	))
 
 	fee := rt.TotalAmount - shard
-	feePenalty := float64(fee) / intervalFeePricePerNat(
-		feeLimit, shard, intervalShardFeeWeight,
+	feePenalty := intervalFeePenalty(
+		float64(fee), shard, intervalShardFeeWeight,
+		intervalBudgetPrice(feeLimit),
 	)
 	hopPenalty := intervalShardHopWeight * float64(len(rt.Hops))
 

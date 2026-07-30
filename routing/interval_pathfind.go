@@ -20,9 +20,9 @@ import (
 // route than dividing by a probability is.
 const (
 	// intervalFeeWeight sets the fee sensitivity of the search when the
-	// payment carries no fee budget. See intervalFeePricePerNat for what
-	// this number means and for the units it is expressed in, which is the
-	// part of this cost function most worth understanding.
+	// payment carries no fee budget. See intervalFeePenalty for what this
+	// number means and for the units it is expressed in, which is the part
+	// of this cost function most worth understanding.
 	intervalFeeWeight = 5.0
 
 	// intervalHopBase and intervalHopGrowth price adding another hop. The
@@ -60,10 +60,10 @@ const (
 	intervalMaxFeePrice = 420_000.0
 )
 
-// intervalFeePricePerNat returns how many millisatoshis of fee this payment
-// will trade for one nat of log probability. It is the exchange rate between
-// the two things the search is minimizing, and it is where the units of the
-// cost function are decided.
+// intervalBudgetPrice returns how many millisatoshis of fee this payment will
+// trade for one nat of log probability, or zero when it carries no budget to
+// derive that from. It is the exchange rate between the two things the search
+// is minimizing, and it is where the units of the cost function are decided.
 //
 // The score this rate feeds is denominated in nats: a hop contributes the
 // negative log of its probability, plus its fee converted through this rate.
@@ -72,8 +72,8 @@ const (
 //
 // The routers this design came from converted fees at a rate proportional to
 // the amount being sent, k times fee over amount with k around 5. Read as a
-// price, that is a willingness to pay amount/k for one nat, which is a fifth of
-// the payment. No realistic fee budget is anywhere near a fifth of the payment,
+// price, that is a willingness to pay amount/k for one nat, which is a fifth
+// of the payment. No realistic fee budget is anywhere near a fifth of it,
 // so the fee term never binds and the search prices reliability as though money
 // were free. Measurement bore that out: those routers walk into fee budgets
 // they cannot see, while lnd, whose path finding prices fees in absolute
@@ -87,13 +87,14 @@ const (
 // the payment grows, which is the right direction: a fee budget quoted in parts
 // per million bites hardest in absolute terms on the largest payments.
 //
-// With no budget there is nothing to derive a rate from, so we fall back to the
-// amount relative rate above, which reproduces the validated behaviour exactly.
-func intervalFeePricePerNat(feeLimit, amt lnwire.MilliSatoshi,
-	weight float64) float64 {
-
-	if feeLimit == lnwire.MaxMilliSatoshi {
-		return math.Max(float64(amt)/weight, 1)
+// With no budget there is nothing to derive a rate from, so this returns zero
+// and the search falls back to the amount relative term it has always used.
+// That fallback is written out longhand in intervalFeePenalty rather than as a
+// division by a rate returned from here, and the comment there says why the
+// difference matters.
+func intervalBudgetPrice(feeLimit lnwire.MilliSatoshi) float64 {
+	if !intervalBudgeted(feeLimit) {
+		return 0
 	}
 
 	price := float64(feeLimit) / intervalBudgetShare
@@ -101,6 +102,43 @@ func intervalFeePricePerNat(feeLimit, amt lnwire.MilliSatoshi,
 	return math.Min(
 		math.Max(price, intervalMinFeePrice), intervalMaxFeePrice,
 	)
+}
+
+// intervalBudgeted reports whether the payment carries a fee budget that a
+// route could actually exceed. Anything short of the sentinel is a real limit.
+func intervalBudgeted(feeLimit lnwire.MilliSatoshi) bool {
+	return feeLimit != lnwire.MaxMilliSatoshi
+}
+
+// intervalFeePenalty converts a fee into the nats the search score is
+// denominated in. A payment with a budget pays the rate its budget sets; one
+// without pays a fixed fraction of the amount it is sending.
+//
+// The unbudgeted branch is written as the one expression it has always been,
+// weight times fee over the amount, rather than as a division by the
+// reciprocal of that. The two agree in exact arithmetic and they do not agree
+// in floating point: over the amounts a real corpus holds they differ
+// about a quarter of the time, one unit in the last place apart, because
+// dividing the amount first rounds once and dividing the fee by that result
+// rounds again.
+//
+// One unit in the last place is normally beneath notice. It is not beneath
+// notice here, because the frontier compares these scores exactly, both to
+// decide whether one label dominates another and to decide which label to
+// evict when a node is full. A tie that used to break one way breaks the other,
+// a different route comes back, and the payment goes somewhere else. When that
+// change was made by accident it was worth 0.032 of objective on one tier, all
+// of it in success. So the rule for this function is bit identity with what
+// came before, not algebraic identity, and the way to keep that is to leave the
+// expression alone.
+func intervalFeePenalty(fee float64, amt lnwire.MilliSatoshi,
+	weight, budgetPrice float64) float64 {
+
+	if budgetPrice > 0 {
+		return fee / budgetPrice
+	}
+
+	return weight * fee / math.Max(float64(amt), 1)
 }
 
 // intervalLabel is one Pareto-incomparable way of reaching the target from a
@@ -209,14 +247,6 @@ type intervalFrontier struct {
 	// that does not, which is a distinction the measurements insisted on.
 	// See insert for what goes wrong when it is set unconditionally.
 	keepCheapest bool
-}
-
-// intervalKeepCheapest reports whether a search should protect the cheapest
-// label a node holds from eviction. It is worth doing for a payment whose fee
-// budget could bind, and a cost for one that has no budget to bind, so the
-// answer is simply whether the payment carries a limit at all.
-func intervalKeepCheapest(feeLimit lnwire.MilliSatoshi) bool {
-	return feeLimit != lnwire.MaxMilliSatoshi
 }
 
 // insert files a label under its node, dropping it if an existing label already
@@ -362,7 +392,8 @@ type intervalPathParams struct {
 	cache *intervalGraphCache
 
 	// feePrice is how many millisatoshis of fee this payment will trade for
-	// one nat of log probability. See intervalFeePricePerNat.
+	// one nat of log probability, or zero when it carries no budget to
+	// derive a rate from. See intervalFeePenalty.
 	feePrice float64
 }
 
@@ -479,9 +510,10 @@ func findIntervalPath(ctx context.Context, p *intervalPathParams) (
 	frontier := &intervalFrontier{
 		labels:    map[route.Vertex][]*intervalLabel{},
 		maxLabels: p.cfg.MaxLabels,
-		keepCheapest: intervalKeepCheapest(
-			p.restrictions.FeeLimit,
-		),
+		// Protecting the cheapest label is worth a slot for a payment
+		// whose budget could bind, and a cost for one with no budget to
+		// bind, so the answer is whether it carries a limit at all.
+		keepCheapest: intervalBudgeted(p.restrictions.FeeLimit),
 	}
 
 	// Calculate the absolute cltv limit. Use uint64 to prevent an overflow
@@ -761,7 +793,9 @@ func (s *intervalSearch) processEdge(fromNode route.Vertex, edge *unifiedEdge,
 	}
 
 	edgeRisk := -math.Log(probability)
-	feePenalty := fee / p.feePrice
+	feePenalty := intervalFeePenalty(
+		fee, p.amt, intervalFeeWeight, p.feePrice,
+	)
 	hopPenalty := intervalHopBase +
 		intervalHopGrowth*float64(label.hops)
 
