@@ -29,7 +29,13 @@ const (
 // newBudgetSession builds a session over a free corridor through the first
 // relay and a paying corridor through the second, and proves the paying one by
 // recording that it has carried the amount.
-func newBudgetSession(t *testing.T) (*intervalPaymentSession, IntervalKey) {
+//
+// The fee limit is the one the payment is created with, which is what decides
+// whether the session treats it as budgeted. Handing a limit to RequestRoute is
+// not the same thing and deliberately does not classify.
+func newBudgetSession(t *testing.T, feeLimit lnwire.MilliSatoshi) (
+	*intervalPaymentSession, IntervalKey) {
+
 	t.Helper()
 
 	var (
@@ -63,7 +69,7 @@ func newBudgetSession(t *testing.T) (*intervalPaymentSession, IntervalKey) {
 	var paymentAddr [32]byte
 	payment := &LightningPayment{
 		FinalCLTVDelta: 40,
-		FeeLimit:       lnwire.MaxMilliSatoshi,
+		FeeLimit:       feeLimit,
 		Target:         target,
 		PaymentAddr:    fn.Some(paymentAddr),
 		Amount:         budgetAmount,
@@ -116,9 +122,9 @@ func TestIntervalBudgetPrice(t *testing.T) {
 
 	amt := lnwire.MilliSatoshi(1_000_000_000)
 
-	// A payment with no budget has no rate. It prices fees off the amount
-	// instead, which intervalFeePenalty does directly.
-	require.Zero(t, intervalBudgetPrice(lnwire.MaxMilliSatoshi))
+	// A payment with no budget has no rate at all.
+	require.Zero(t, newIntervalFeeRate(false, amt).price)
+	require.False(t, newIntervalFeeRate(false, amt).budgeted)
 
 	// With a budget the rate is absolute and derived from what is left.
 	budget := lnwire.MilliSatoshi(400_000)
@@ -158,7 +164,7 @@ func TestIntervalBudgetPrice(t *testing.T) {
 	// Read as a price, the unbudgeted fallback is a fifth of the payment,
 	// which no fee budget anybody would set comes close to. That is the
 	// whole reason it never binds.
-	unbudgeted := intervalFeePenalty(1, amt, intervalFeeWeight, 0)
+	unbudgeted := intervalFeeRate{}.penalty(1, amt, intervalFeeWeight)
 	require.Less(t, unbudgeted, 1/(float64(amt)/10))
 }
 
@@ -199,7 +205,9 @@ func TestIntervalFeePenaltyUnbudgetedIsVerbatim(t *testing.T) {
 
 				want := weight * fee /
 					math.Max(float64(amt), 1)
-				got := intervalFeePenalty(fee, amt, weight, 0)
+				got := intervalFeeRate{}.penalty(
+					fee, amt, weight,
+				)
 
 				require.Equal(t, math.Float64bits(want),
 					math.Float64bits(got),
@@ -220,10 +228,10 @@ func TestIntervalFeePenaltyUnbudgetedIsVerbatim(t *testing.T) {
 
 	// A payment with a budget takes the other branch and pays the rate the
 	// budget sets.
-	price := intervalBudgetPrice(400_000)
+	rate := newIntervalFeeRate(true, 400_000)
 	require.Equal(
-		t, 1_000/price,
-		intervalFeePenalty(1_000, 100_000_000, intervalFeeWeight, price),
+		t, 1_000/rate.price,
+		rate.penalty(1_000, 100_000_000, intervalFeeWeight),
 	)
 }
 
@@ -241,7 +249,7 @@ func TestIntervalBudgetPicksCheapCorridor(t *testing.T) {
 
 	// With no budget the fee term is a rounding error against the risk of
 	// an unproven corridor, so the proven one wins.
-	session, _ := newBudgetSession(t)
+	session, _ := newBudgetSession(t, lnwire.MaxMilliSatoshi)
 
 	rt, err := session.RequestRoute(
 		budgetAmount, lnwire.MaxMilliSatoshi, 0, 0, nil,
@@ -253,7 +261,7 @@ func TestIntervalBudgetPicksCheapCorridor(t *testing.T) {
 	// Now hand the same session the same choice with a budget that can
 	// still afford the paying corridor twice over, but under which one nat
 	// of reliability is no longer worth what that corridor charges.
-	session, _ = newBudgetSession(t)
+	session, _ = newBudgetSession(t, budgetHopFee*2)
 
 	rt, err = session.RequestRoute(budgetAmount, budgetHopFee*2, 0, 0, nil)
 	require.NoError(t, err)
@@ -273,7 +281,7 @@ func TestIntervalBudgetNeverExceeded(t *testing.T) {
 	}
 
 	for _, limit := range limits {
-		session, _ := newBudgetSession(t)
+		session, _ := newBudgetSession(t, limit)
 
 		rt, err := session.RequestRoute(budgetAmount, limit, 0, 0, nil)
 		if err != nil {
@@ -290,7 +298,7 @@ func TestIntervalBudgetNeverExceeded(t *testing.T) {
 
 	// A budget too small for even the free corridor's zero fee is still
 	// routable, since the free corridor costs nothing.
-	session, _ := newBudgetSession(t)
+	session, _ := newBudgetSession(t, 0)
 	rt, err := session.RequestRoute(budgetAmount, 0, 0, 0, nil)
 	require.NoError(t, err)
 	require.Zero(t, rt.TotalAmount-budgetAmount)
@@ -390,4 +398,100 @@ func TestIntervalBudgeted(t *testing.T) {
 		require.True(t, intervalBudgeted(limit),
 			"a limit of %v should price fees", limit)
 	}
+}
+
+// TestIntervalBudgetSurvivesShards tests the bug this classification exists to
+// avoid, and its mirror.
+//
+// RequestRoute is handed the budget remaining, not the budget. An unbudgeted
+// payment therefore carries the no-limit sentinel only until its first shard
+// pays a fee; from the second shard on it carries the sentinel minus that fee,
+// which is an ordinary looking number. Reading that as "this payment has a
+// budget" flipped every unbudgeted payment that splits onto the budgeted
+// branch, priced its fees against a limit nobody set, and turned on a frontier
+// protection it had no use for.
+func TestIntervalBudgetSurvivesShards(t *testing.T) {
+	t.Parallel()
+
+	// What the lifecycle hands the second route request of a payment whose
+	// first shard paid a fee. It is not the sentinel, and that is the point.
+	const feesPaid = budgetHopFee
+
+	afterFirstShard := lnwire.MaxMilliSatoshi - feesPaid
+	require.NotEqual(t, lnwire.MaxMilliSatoshi, afterFirstShard)
+
+	// A payment created with no limit stays unbudgeted across its shards,
+	// however much of the sentinel its shards have eaten.
+	session, _ := newBudgetSession(t, lnwire.MaxMilliSatoshi)
+	require.False(t, session.budgeted)
+
+	for _, remaining := range []lnwire.MilliSatoshi{
+		lnwire.MaxMilliSatoshi, afterFirstShard,
+		lnwire.MaxMilliSatoshi - feesPaid*2, budgetHopFee,
+	} {
+		rate := session.feeRate(remaining)
+
+		// No budget branch, so no budget price, no cheapest-label keep,
+		// and a fee term that is the verbatim amount relative
+		// expression.
+		require.False(t, rate.budgeted,
+			"reclassified as budgeted at a remainder of %v",
+			remaining)
+		require.Zero(t, rate.price)
+		require.Equal(
+			t, intervalFeeWeight*float64(budgetHopFee)/
+				math.Max(float64(budgetAmount), 1),
+			rate.penalty(
+				float64(budgetHopFee), budgetAmount,
+				intervalFeeWeight,
+			),
+		)
+	}
+
+	// Driving two requests through the session leaves the latch alone, which
+	// is the whole of the fix.
+	_, err := session.RequestRoute(
+		budgetAmount, lnwire.MaxMilliSatoshi, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.False(t, session.budgeted)
+
+	_, err = session.RequestRoute(budgetAmount, afterFirstShard, 0, 0, nil)
+	require.NoError(t, err)
+	require.False(t, session.budgeted)
+	require.False(t, session.feeRate(afterFirstShard).budgeted)
+
+	// The mirror: a payment created with a limit stays budgeted across its
+	// shards, and the rate it pays follows the shrinking remainder down.
+	budgeted, _ := newBudgetSession(t, budgetHopFee*4)
+	require.True(t, budgeted.budgeted)
+
+	// These remainders are all under the rate ceiling, so the rate they
+	// produce actually moves rather than pinning to the clamp.
+	previous := math.MaxFloat64
+	for _, remaining := range []lnwire.MilliSatoshi{
+		budgetHopFee * 4, budgetHopFee * 3, budgetHopFee * 2,
+	} {
+		rate := budgeted.feeRate(remaining)
+
+		require.True(t, rate.budgeted)
+		require.Equal(t, intervalBudgetPrice(remaining), rate.price)
+		require.Less(t, rate.price, previous)
+		previous = rate.price
+
+		// The budgeted branch prices off the rate rather than off the
+		// amount.
+		require.Equal(
+			t, float64(budgetHopFee)/rate.price,
+			rate.penalty(
+				float64(budgetHopFee), budgetAmount,
+				intervalFeeWeight,
+			),
+		)
+	}
+
+	_, err = budgeted.RequestRoute(budgetAmount, budgetHopFee*4, 0, 0, nil)
+	require.NoError(t, err)
+	require.True(t, budgeted.budgeted)
+	require.True(t, budgeted.feeRate(budgetHopFee*2).budgeted)
 }
