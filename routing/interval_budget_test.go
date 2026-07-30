@@ -235,48 +235,64 @@ func TestIntervalBudgetNeverExceeded(t *testing.T) {
 	require.Zero(t, rt.TotalAmount-budgetAmount)
 }
 
-// TestIntervalFrontierKeepsCheapestLabel tests that the search never throws
-// away the cheapest way out of a node. A frontier that fills with reliable
-// expensive labels leaves a payment that cannot afford them with nothing, which
-// is the failure the budget work exists to prevent.
+// TestIntervalFrontierKeepsCheapestLabel tests that the cheapest way out of a
+// node is protected from eviction when the payment carries a fee budget, and
+// only then.
+//
+// Under a budget the protection is what stops a frontier of reliable expensive
+// labels from leaving a payment that cannot afford any of them with nothing.
+// Without a budget it is a label kept for a limit that does not exist,
+// displacing one that would have served the payment being made, and measurement
+// found that costs real success on payments with no limit set.
 func TestIntervalFrontierKeepsCheapestLabel(t *testing.T) {
 	t.Parallel()
 
 	const deliver = lnwire.MilliSatoshi(1_000_000)
 
-	node := route.Vertex{1}
-	frontier := &intervalFrontier{
-		labels:    map[route.Vertex][]*intervalLabel{},
-		maxLabels: 3,
-	}
+	// fill builds a frontier holding one cheap badly scoring label plus
+	// enough better scoring dearer ones to force eviction, and returns the
+	// cheap label and what the node ended up keeping.
+	fill := func(keepCheapest bool) (*intervalLabel, []*intervalLabel) {
+		node := route.Vertex{1}
+		frontier := &intervalFrontier{
+			labels:       map[route.Vertex][]*intervalLabel{},
+			maxLabels:    3,
+			keepCheapest: keepCheapest,
+		}
 
-	// The cheapest label is also the worst scoring one, so every rule but
-	// this one would evict it.
-	cheapest := &intervalLabel{
-		node:              node,
-		netAmountReceived: deliver,
-		score:             100,
-		hops:              1,
-	}
-	require.True(t, frontier.insert(cheapest, deliver))
-
-	// Fill the node with labels that score better and cost more. Score
-	// falls as the amount rises across the set, so no label dominates
-	// another and every one of them is a genuine trade-off the search would
-	// want to keep.
-	for i := 1; i <= 6; i++ {
-		frontier.insert(&intervalLabel{
+		// The cheapest label is also the worst scoring one, so nothing
+		// but the protection would keep it.
+		cheapest := &intervalLabel{
 			node:              node,
-			netAmountReceived: deliver * lnwire.MilliSatoshi(10+i),
-			score:             float64(10 - i),
+			netAmountReceived: deliver,
+			score:             100,
 			hops:              1,
-		}, deliver)
+		}
+		require.True(t, frontier.insert(cheapest, deliver))
+
+		// Score falls as the amount rises across the rest of the set, so
+		// no label dominates another and each is a genuine trade-off the
+		// search would want to keep.
+		for i := 1; i <= 6; i++ {
+			frontier.insert(&intervalLabel{
+				node: node,
+				netAmountReceived: deliver *
+					lnwire.MilliSatoshi(10+i),
+				score: float64(10 - i),
+				hops:  1,
+			}, deliver)
+		}
+
+		kept := frontier.labels[node]
+		require.Len(t, kept, frontier.maxLabels)
+
+		return cheapest, kept
 	}
 
-	kept := frontier.labels[node]
-	require.Len(t, kept, frontier.maxLabels)
+	// With a budget the cheap label survives, and it is still the cheapest
+	// thing the node holds.
+	cheapest, kept := fill(true)
 
-	// The cheapest label survived, and it is still the cheapest.
 	require.Contains(t, kept, cheapest)
 	require.True(t, cheapest.active)
 
@@ -285,5 +301,32 @@ func TestIntervalFrontierKeepsCheapestLabel(t *testing.T) {
 			t, label.netAmountReceived,
 			cheapest.netAmountReceived,
 		)
+	}
+
+	// With no budget it is evicted on its score like any other label, which
+	// is the behaviour the search had before fee budgets were priced at all.
+	cheapest, kept = fill(false)
+
+	require.NotContains(t, kept, cheapest)
+	require.False(t, cheapest.active)
+
+	for _, label := range kept {
+		require.Less(t, label.score, cheapest.score)
+	}
+}
+
+// TestIntervalKeepCheapest tests the switch that decides which of the two
+// eviction rules a search uses. Anything short of the sentinel is a real limit
+// a route can exceed, so anything short of it turns the protection on.
+func TestIntervalKeepCheapest(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, intervalKeepCheapest(lnwire.MaxMilliSatoshi))
+
+	for _, limit := range []lnwire.MilliSatoshi{
+		0, 1, budgetHopFee, lnwire.MaxMilliSatoshi - 1,
+	} {
+		require.True(t, intervalKeepCheapest(limit),
+			"a limit of %v should price fees", limit)
 	}
 }
