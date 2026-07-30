@@ -183,6 +183,12 @@ type intervalPaymentSession struct {
 	// of what this session owes back to it.
 	outstanding []*heldShard
 
+	// budgeted is latched at construction from the fee limit this payment
+	// was created with. It decides which way fees are priced and whether the
+	// search protects the cheapest label, and it must never be re-derived
+	// from the remaining budget the lifecycle hands RequestRoute.
+	budgeted bool
+
 	attempts       uint32
 	failedAttempts uint32
 	settledParts   uint32
@@ -221,6 +227,13 @@ func newIntervalPaymentSession(p *LightningPayment, selfNode route.Vertex,
 	logPrefix := fmt.Sprintf("IntervalSession(%x):", p.Identifier())
 
 	return &intervalPaymentSession{
+		// Whether this payment has a budget is settled here and never
+		// asked again. RequestRoute is handed the budget remaining
+		// rather than the budget, and a limit with fees subtracted from
+		// it stops looking like the no-limit sentinel after the first
+		// shard pays anything, so a payment with no budget that splits
+		// would otherwise reclassify itself as having one.
+		budgeted:          intervalBudgeted(p.FeeLimit),
 		additionalEdges:   edges,
 		selfNode:          selfNode,
 		payment:           p,
@@ -466,10 +479,8 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 	)
 
 	// The budget belongs to the payment rather than to any one shard, so
-	// every rung is priced against the same rate. A payment with no budget
-	// gets a zero here and the search prices its fees off the amount
-	// instead.
-	params.feePrice = intervalBudgetPrice(req.restrictions.FeeLimit)
+	// every rung is priced against the same rate.
+	params.feeRate = p.feeRate(req.restrictions.FeeLimit)
 
 	for _, shard := range req.shards {
 		params.amt = shard
@@ -533,7 +544,7 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 			shard: shard,
 			utility: intervalUtility(
 				rt, shard, req.maxAmt, req.minimum,
-				req.restrictions.FeeLimit, risk, appetite,
+				params.feeRate, risk, appetite,
 			),
 		}
 
@@ -559,17 +570,17 @@ func (p *intervalPaymentSession) chooseShard(ctx context.Context,
 // intervalUtility prices a shard and the route found for it. The dominant term
 // is the risk of the route, traded against how much of the remaining amount the
 // shard would carry.
-func intervalUtility(rt *route.Route, shard, maxAmt, minimum,
-	feeLimit lnwire.MilliSatoshi, risk, appetite float64) float64 {
+func intervalUtility(rt *route.Route, shard, maxAmt,
+	minimum lnwire.MilliSatoshi, feeRate intervalFeeRate,
+	risk, appetite float64) float64 {
 
 	progress := math.Log(math.Max(
 		float64(shard)/math.Max(float64(minimum), 1), 1,
 	))
 
 	fee := rt.TotalAmount - shard
-	feePenalty := intervalFeePenalty(
+	feePenalty := feeRate.penalty(
 		float64(fee), shard, intervalShardFeeWeight,
-		intervalBudgetPrice(feeLimit),
 	)
 	hopPenalty := intervalShardHopWeight * float64(len(rt.Hops))
 
@@ -1252,6 +1263,20 @@ func (p *intervalPaymentSession) ReleaseAttempts() {
 	}
 
 	p.outstanding = nil
+}
+
+// feeRate returns how this session prices fees, given what the budget has left
+// right now.
+//
+// The two halves of the answer come from different places on purpose. Whether
+// there is a budget at all was latched when the session was built, from the
+// limit the payment carries. How dearly a budget prices reliability comes from
+// the remainder, which the lifecycle recomputes before every request and which
+// therefore must never be asked whether a budget exists.
+func (p *intervalPaymentSession) feeRate(
+	remaining lnwire.MilliSatoshi) intervalFeeRate {
+
+	return newIntervalFeeRate(p.budgeted, remaining)
 }
 
 // scoped returns the key a hop of a dispatched route was priced under.
