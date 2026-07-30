@@ -331,3 +331,87 @@ func TestIntervalSessionQuarantinesAmbiguousFailure(t *testing.T) {
 		)
 	}
 }
+
+// TestIntervalQuarantineSeverable tests that the quarantine can be switched off
+// without touching anything else. It measured as a null on the tiers built to
+// reward it, so whether it ships is a decision somebody should be able to make
+// with a config field rather than a patch.
+func TestIntervalQuarantineSeverable(t *testing.T) {
+	t.Parallel()
+
+	// The zero value keeps the mechanism on, which is the behaviour every
+	// published measurement of this router was taken with.
+	require.False(t, IntervalConfig{}.DisableQuarantine)
+	require.False(t, DefaultIntervalConfig().DisableQuarantine)
+
+	route := func(disabled bool) (*IntervalStore, []IntervalKey) {
+		session, store := newCorridorSession(
+			t, lnwire.NewMSatFromSatoshis(600_000), 1,
+		)
+		session.cfg.DisableQuarantine = disabled
+
+		// A route with two hops that are not ours, so an unattributable
+		// failure over it has two suspects and neither can be named.
+		rt := &route.Route{
+			TotalAmount:  600_000_000,
+			SourcePubKey: createPubkey(sourceNodeID),
+			Hops: []*route.Hop{
+				{
+					PubKeyBytes:  createPubkey(firstRelayID),
+					ChannelID:    1,
+					AmtToForward: 600_000_000,
+				},
+				{
+					PubKeyBytes: createPubkey(
+						secondRelayID,
+					),
+					ChannelID:    9,
+					AmtToForward: 600_000_000,
+				},
+				{
+					PubKeyBytes:  createPubkey(targetNodeID),
+					ChannelID:    4,
+					AmtToForward: 600_000_000,
+				},
+			},
+		}
+
+		keys := intervalRouteKeys(rt)
+		for _, key := range keys {
+			session.capacities[key] = lnwire.NewMSatFromSatoshis(
+				budgetCapacity,
+			)
+		}
+
+		session.ReportAttemptFailure(0, rt, nil, nil)
+
+		return store, keys
+	}
+
+	capacity := lnwire.NewMSatFromSatoshis(budgetCapacity)
+
+	// On, the suspects carry a discount.
+	store, keys := route(false)
+
+	var suspected int
+	for _, key := range keys {
+		if store.Get(key, capacity).SuspectAmt != 0 {
+			suspected++
+		}
+	}
+	require.NotZero(t, suspected)
+
+	// Off, the store hears nothing at all. Nothing is recorded, so nothing
+	// prices, and the payment falls back to handling the failure with the
+	// penalties that live and die with it.
+	store, keys = route(true)
+
+	require.Zero(t, store.Len())
+	for _, key := range keys {
+		interval := store.Get(key, capacity)
+
+		require.Zero(t, interval.SuspectAmt)
+		require.Zero(t, interval.SuspectWeight)
+		require.False(t, interval.Known)
+	}
+}

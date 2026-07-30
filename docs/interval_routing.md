@@ -249,13 +249,17 @@ written about the pair instead, at the granularity mission control has always
 used. Pairs with a single channel, which is most of them, keep the full
 resolution.
 
-**The quarantine is validated in simulation only.** Promotion after enough
-agreement, and clearing on contradiction, come from a router bred against a
-channel that lies about where failures happen. That router produced the flattest
-degradation profile the work has measured, but it bought the flatness partly by
-never giving up, and none of it has been measured on a real network. The
+**The quarantine is validated in simulation only, and measured as a null.**
+Promotion after enough agreement, and clearing on contradiction, come from a
+router bred against a channel that lies about where failures happen. That
+router produced the flattest degradation profile the work has measured, but it
+bought the flatness partly by never giving up, and none of it has been measured
+on a real network. The
 quarantine is also held in memory only, since a suspicion restored from disk
-would be one that nothing since had a chance to clear.
+would be one that nothing since had a chance to clear. Re-benchmarking found it
+moved no degraded tier either way, so it can be switched off with
+`DisableQuarantine` without touching anything else, and the router then handles
+an unattributable failure entirely within the payment as it did before.
 
 **A resumed payment's HTLCs are not counted as holds.** After a restart the
 router knows a payment has attempts in flight, because the payments database
