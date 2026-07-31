@@ -985,8 +985,14 @@ func (p *intervalPaymentSession) recordUnattributedFailure(rt *route.Route,
 			continue
 		}
 
+		// A hop we have watched settle this amount is struck off the
+		// list. Only a settlement counts: a lower bound can also come
+		// from a failure reported further along the route, and when the
+		// report names the wrong hop that bound lands on the very
+		// channel that refused. See LiquidityInterval.ProvenOK.
 		amt := intervalHopAmount(rt, i)
-		if p.store.Get(key, p.capacities[key]).LowerOK >= amt {
+		proven := p.store.Get(key, p.capacities[key]).ProvenOK
+		if proven != 0 && proven >= amt {
 			continue
 		}
 
