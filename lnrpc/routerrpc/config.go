@@ -60,10 +60,11 @@ func DefaultConfig() *Config {
 		ProbabilityEstimatorType: routing.DefaultEstimator,
 		MinRouteProbability:      routing.DefaultMinRouteProbability,
 
-		AttemptCost:     routing.DefaultAttemptCost.ToSatoshis(),
-		AttemptCostPPM:  routing.DefaultAttemptCostPPM,
-		MaxMcHistory:    routing.DefaultMaxMcHistory,
-		McFlushInterval: routing.DefaultMcFlushInterval,
+		AttemptCost:           routing.DefaultAttemptCost.ToSatoshis(),
+		AttemptCostPPM:        routing.DefaultAttemptCostPPM,
+		MaxMcHistory:          routing.DefaultMaxMcHistory,
+		McFlushInterval:       routing.DefaultMcFlushInterval,
+		IntervalFlushInterval: routing.DefaultIntervalFlushInterval,
 		AprioriConfig: &AprioriConfig{
 			HopProbability:   routing.DefaultAprioriHopProbability,
 			Weight:           routing.DefaultAprioriWeight,
@@ -93,6 +94,7 @@ func GetRoutingConfig(cfg *Config) *RoutingConfig {
 		AttemptCostPPM:           cfg.AttemptCostPPM,
 		MaxMcHistory:             cfg.MaxMcHistory,
 		McFlushInterval:          cfg.McFlushInterval,
+		IntervalFlushInterval:    cfg.IntervalFlushInterval,
 		AprioriConfig: &AprioriConfig{
 			HopProbability:   cfg.AprioriConfig.HopProbability,
 			Weight:           cfg.AprioriConfig.Weight,

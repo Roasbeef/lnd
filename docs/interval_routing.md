@@ -72,8 +72,20 @@ named and how much corroboration stands behind it, where a failure naming two
 suspects contributes half as much as one naming a single suspect. Quarantined
 evidence prices as a discount on the amount it named and never as an
 impossibility. Once enough independent failures agree on the same channel it is
-promoted into an ordinary upper bound, and the moment the channel carries that
-amount after all, the suspicion is dropped.
+promoted into an ordinary upper bound.
+
+Only a settlement clears a suspicion. That is a narrower rule than it sounds,
+and it is the one thing in this section worth understanding. When a hop reports
+a failure, the router writes a lower bound on every hop before it, because
+forwarding is what carried the payment that far. The inference holds when the
+report names the right hop. When blame arrives shifted downstream, which is one
+of the ways a real network lies, the guilty channel sits before the reported
+index and collects a lower bound saying it carried the amount it had just
+refused. A quarantine that accepted lower bounds as proof of innocence would let
+that channel out of every suspicion it belonged in, and would pile the blame
+onto its innocent neighbours instead. So the router keeps a separate record of
+what it has watched actually move, written by nothing but a settlement, and only
+that clears a suspicion. The lower bound keeps every other job it has.
 
 ### What it believes with no evidence at all
 
@@ -254,8 +266,17 @@ agreement, and clearing on contradiction, come from a router bred against a
 channel that lies about where failures happen. That router produced the flattest
 degradation profile the work has measured, but it bought the flatness partly by
 never giving up, and none of it has been measured on a real network. The
-quarantine is also held in memory only, since a suspicion restored from disk
-would be one that nothing since had a chance to clear.
+quarantine is held in memory only, as is the record of settlements that clears
+it, since neither survives a restart with its meaning intact. It can be switched
+off with `DisableQuarantine` without touching anything else, and the router then
+handles an unattributable failure entirely within the payment as it did before.
+
+One promotion case is knowingly left on the floor. When a probe derived lower
+bound lands at exactly the amount an ambiguous failure names, a promoted bound
+is written and then dropped again by the ordinary rule that a lower and an upper
+bound at the same amount cannot both stand. The suspicion is still held and
+still priced until then. Changing that rule would reach outside the quarantine
+into bound maintenance, so it stays as it is.
 
 **A resumed payment's HTLCs are not counted as holds.** After a restart the
 router knows a payment has attempts in flight, because the payments database

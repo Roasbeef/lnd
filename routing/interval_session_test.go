@@ -1,11 +1,14 @@
 package routing
 
 import (
+	"bytes"
 	"math"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -480,12 +483,33 @@ func TestIntervalSessionSourceFallback(t *testing.T) {
 
 	// A payment to a blinded path falls back to the stock one, because the
 	// interval model has no directed channel to key its beliefs on inside a
-	// blinded path.
-	payment.BlindedPathSet = &BlindedPaymentPathSet{}
+	// blinded path. The fallback has to be graceful: a payment lnd can route
+	// today must not become unroutable because this router is switched on.
+	//
+	// Route hints and a blinded path are mutually exclusive, so drop the
+	// hints the way a real blinded payment would arrive.
+	payment.RouteHints = nil
+	payment.BlindedPathSet = newTestBlindedPathSet(t)
+
 	session, err = source.NewPaymentSession(payment, fn.None[tlv.Blob](),
 		fn.None[htlcswitch.AuxTrafficShaper]())
 	require.NoError(t, err)
 	require.IsType(t, &paymentSession{}, session)
+
+	// The fallback is transparent: it is exactly the session the stock
+	// source would have handed out on its own.
+	stockSession, err := stock.NewPaymentSession(
+		payment, fn.None[tlv.Blob](),
+		fn.None[htlcswitch.AuxTrafficShaper](),
+	)
+	require.NoError(t, err)
+	require.IsType(t, stockSession, session)
+
+	// A session that came from the fallback is the stock one all the way
+	// through, so it never reports attempts to a belief store that has no
+	// way to key them.
+	_, reports := session.(PaymentResultReporter)
+	require.False(t, reports)
 
 	// The empty session is the stock one either way, since it holds no
 	// routing at all.
@@ -579,6 +603,42 @@ func TestLifecycleReportsToSession(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, []uint64{attempt.AttemptID}, session.failures)
+}
+
+// newTestBlindedPathSet builds a blinded path set that passes validation, so
+// that the fallback is exercised on a payment lnd would really accept rather
+// than on an empty struct.
+func newTestBlindedPathSet(t *testing.T) *BlindedPaymentPathSet {
+	t.Helper()
+
+	_, introPoint := btcec.PrivKeyFromBytes([]byte{1})
+	_, blindedPoint := btcec.PrivKeyFromBytes([]byte{5})
+
+	payment := &BlindedPayment{
+		BlindedPath: &sphinx.BlindedPath{
+			IntroductionPoint: introPoint,
+			BlindingPoint:     blindedPoint,
+			BlindedHops: []*sphinx.BlindedHopInfo{
+				{
+					BlindedNodePub: introPoint,
+					CipherText: bytes.Repeat(
+						[]byte{1}, 100,
+					),
+				},
+			},
+		},
+		BaseFee:             1000,
+		ProportionalFeeRate: 500,
+		CltvExpiryDelta:     140,
+		HtlcMinimum:         100,
+		HtlcMaximum:         100_000_000,
+		Features:            lnwire.EmptyFeatureVector(),
+	}
+
+	set, err := NewBlindedPaymentPathSet([]*BlindedPayment{payment})
+	require.NoError(t, err)
+
+	return set
 }
 
 // TestStockSessionReportsNothing tests that with the interval router switched

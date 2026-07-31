@@ -48,6 +48,12 @@ type RoutingConfig struct {
 	// control state to the DB.
 	McFlushInterval time.Duration `long:"mcflushinterval" description:"the timer interval to use to flush mission control state to the DB"`
 
+	// IntervalFlushInterval defines the timer interval to use to flush the
+	// interval router's liquidity beliefs to the DB. It is only used when
+	// the interval router is selected and the node runs the native SQL
+	// backend.
+	IntervalFlushInterval time.Duration `long:"intervalflushinterval" description:"the timer interval to use to flush the interval router's liquidity beliefs to the DB"`
+
 	// AprioriConfig defines parameters for the apriori probability.
 	AprioriConfig *AprioriConfig `group:"apriori" namespace:"apriori" description:"configuration for the apriori pathfinding probability estimator"`
 

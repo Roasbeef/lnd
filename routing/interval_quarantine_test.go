@@ -129,58 +129,237 @@ func TestIntervalQuarantinePromotesAtSmallestAmount(t *testing.T) {
 	)
 }
 
-// TestIntervalQuarantineClearsOnContradiction tests that watching the channel
-// do the thing it was suspected of failing drops the suspicion outright. This
-// is what keeps an ambiguous failure from poisoning a channel that was never at
-// fault.
+// TestIntervalQuarantineClearsOnContradiction tests what does and does not
+// count as proof that a suspicion was misplaced.
+//
+// Only a settlement counts. A lower bound is not enough, because a lower bound
+// also rises when some hop reports a failure and we infer that the hops before
+// it forwarded. That inference is sound exactly when the report names the right
+// hop, and misattribution is the case where it does not.
 func TestIntervalQuarantineClearsOnContradiction(t *testing.T) {
 	t.Parallel()
 
 	capacity := testIntervalCapacity
 	amt := capacity / 2
 
-	// A probe of the suspected amount clears it.
+	// A probe does not clear a suspicion, however large. It is an inference
+	// from somebody else's failure report, and the report may have named
+	// the wrong hop.
 	store := NewIntervalStore(0)
 	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
-	store.RecordProbe(testIntervalKey, amt, capacity)
+	store.RecordProbe(testIntervalKey, amt*3/2, capacity)
 
 	interval := store.Get(testIntervalKey, capacity)
+	require.Equal(t, amt, interval.SuspectAmt)
+	require.NotZero(t, interval.SuspectWeight)
+	require.Zero(t, interval.ProvenOK)
+
+	// A settlement of the suspected amount does clear it. The money moved,
+	// which is the one thing no misattribution can manufacture.
+	store = NewIntervalStore(0)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
+	store.RecordSettlement(testIntervalKey, amt, capacity)
+
+	interval = store.Get(testIntervalKey, capacity)
 	require.Zero(t, interval.SuspectAmt)
 	require.Zero(t, interval.SuspectWeight)
-	require.EqualValues(
-		t, intervalProvenProbability,
-		store.Probability(testIntervalKey, amt, capacity),
-	)
+	require.Equal(t, amt, interval.ProvenOK)
 
-	// So does a probe of more than the suspected amount.
+	// So does a settlement of more than the suspected amount.
 	store = NewIntervalStore(0)
-	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
-	store.RecordProbe(testIntervalKey, amt*3/2, capacity)
+	store.RecordSuspectFailure(testIntervalKey, amt/2, capacity, 1.0)
+	store.RecordSettlement(testIntervalKey, amt, capacity)
 	require.Zero(t, store.Get(testIntervalKey, capacity).SuspectAmt)
 
-	// A probe of less does not, since it says nothing about the amount the
-	// failure named.
+	// A settlement of less does not, since it says nothing about the amount
+	// the failure named.
 	store = NewIntervalStore(0)
 	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
-	store.RecordProbe(testIntervalKey, amt/4, capacity)
+	store.RecordSettlement(testIntervalKey, amt/4, capacity)
 	require.Equal(
 		t, amt, store.Get(testIntervalKey, capacity).SuspectAmt,
 	)
 
-	// A settlement clears it too, since a settlement is a stronger form of
-	// the same contradiction.
-	store = NewIntervalStore(0)
-	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
-	store.RecordProbe(testIntervalKey, amt, capacity)
-	store.RecordSettlement(testIntervalKey, amt/10, capacity)
-	require.Zero(t, store.Get(testIntervalKey, capacity).SuspectAmt)
-
-	// A suspicion about an amount we have already proven is never held in
+	// A suspicion about an amount we have watched settle is never held in
 	// the first place.
 	store = NewIntervalStore(0)
-	store.RecordProbe(testIntervalKey, amt, capacity)
+	store.RecordSettlement(testIntervalKey, amt, capacity)
 	store.RecordSuspectFailure(testIntervalKey, amt/2, capacity, 1.0)
 	require.Zero(t, store.Get(testIntervalKey, capacity).SuspectAmt)
+
+	// Proof is monotone: a later, smaller settlement does not walk it back
+	// and re-arm a suspicion the larger one had cleared.
+	store.RecordSettlement(testIntervalKey, amt/8, capacity)
+	require.Equal(t, amt, store.Get(testIntervalKey, capacity).ProvenOK)
+}
+
+// TestIntervalQuarantineSurvivesMisattribution tests the failure shape this
+// trust boundary exists for.
+//
+// A failure reported by some hop makes us write a lower bound on every hop
+// before it, because forwarding is what got the payment that far. Under
+// attribution shift the report names a hop downstream of the one that actually
+// refused, which puts the guilty channel before the reported index and hands it
+// a lower bound claiming it carried the very amount it just turned down. If
+// that bound counted as proof of innocence, the culprit would be struck off
+// every suspect list it belonged on, and the weight of the failure would
+// concentrate on the innocent channels that remained.
+func TestIntervalQuarantineSurvivesMisattribution(t *testing.T) {
+	t.Parallel()
+
+	capacity := testIntervalCapacity
+	amt := capacity / 2
+
+	store := NewIntervalStore(0)
+
+	// The shifted report: the true culprit is named as a hop that forwarded,
+	// so it collects a lower bound for the amount it actually refused.
+	store.RecordProbe(testIntervalKey, amt, capacity)
+	require.Equal(t, amt, store.Get(testIntervalKey, capacity).LowerOK)
+	require.Zero(t, store.Get(testIntervalKey, capacity).ProvenOK)
+
+	// A later ambiguous failure names the same channel at the same amount.
+	// The false bound must not suppress it.
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
+
+	interval := store.Get(testIntervalKey, capacity)
+	require.Equal(t, amt, interval.SuspectAmt,
+		"a probe derived bound suppressed a suspicion")
+	require.NotZero(t, interval.SuspectWeight)
+
+	// The suspicion prices, so the channel is discounted at the amount it
+	// keeps being blamed for.
+	clean := NewIntervalStore(0)
+	clean.RecordProbe(testIntervalKey, amt, capacity)
+	require.Less(
+		t, store.Probability(testIntervalKey, amt, capacity),
+		clean.Probability(testIntervalKey, amt, capacity),
+	)
+
+	// Corroboration still convicts. The false bound sits below the amount
+	// the ambiguous failures name, which is the ordinary case, and the
+	// promotion writes the bound it should.
+	store = NewIntervalStore(0)
+	store.RecordProbe(testIntervalKey, amt/2, capacity)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.05)
+
+	interval = store.Get(testIntervalKey, capacity)
+	require.Equal(t, amt, interval.UpperFail)
+	require.Zero(t, interval.SuspectAmt)
+
+	// One case is worth pinning because it is left deliberately alone. When
+	// a false bound lands at exactly the amount the failures name, the
+	// promotion is written and then dropped again by the rule that a lower
+	// bound and an upper bound at the same amount cannot both stand. That
+	// rule is ordinary bound maintenance, it is not part of the quarantine,
+	// and rewriting it would be a change nobody has measured. The suspicion
+	// is still held and still priced up to that point, which is the part
+	// that matters.
+	store = NewIntervalStore(0)
+	store.RecordProbe(testIntervalKey, amt, capacity)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.05)
+
+	require.Zero(t, store.Get(testIntervalKey, capacity).UpperFail)
+
+	// Ground truth still speaks. A settlement over the same channel clears
+	// a suspicion that a hundred probes could not.
+	store = NewIntervalStore(0)
+	store.RecordProbe(testIntervalKey, amt, capacity)
+	store.RecordSuspectFailure(testIntervalKey, amt, capacity, 1.0)
+	require.NotZero(t, store.Get(testIntervalKey, capacity).SuspectAmt)
+
+	store.RecordSettlement(testIntervalKey, amt, capacity)
+	require.Zero(t, store.Get(testIntervalKey, capacity).SuspectAmt)
+}
+
+// TestIntervalQuarantineSuspectListIgnoresProbes tests the same boundary at the
+// place the session applies it: a hop is struck off the suspect list of an
+// unattributable failure only when a settlement has proven it, never when a
+// probe has merely implied it.
+func TestIntervalQuarantineSuspectListIgnoresProbes(t *testing.T) {
+	t.Parallel()
+
+	capacity := lnwire.NewMSatFromSatoshis(budgetCapacity)
+	amt := lnwire.MilliSatoshi(600_000_000)
+
+	// A route with two hops that are not ours, so an unattributable failure
+	// over it has two suspects.
+	rt := &route.Route{
+		TotalAmount:  amt,
+		SourcePubKey: createPubkey(sourceNodeID),
+		Hops: []*route.Hop{
+			{
+				PubKeyBytes:  createPubkey(firstRelayID),
+				ChannelID:    1,
+				AmtToForward: amt,
+			},
+			{
+				PubKeyBytes:  createPubkey(secondRelayID),
+				ChannelID:    9,
+				AmtToForward: amt,
+			},
+			{
+				PubKeyBytes:  createPubkey(targetNodeID),
+				ChannelID:    4,
+				AmtToForward: amt,
+			},
+		},
+	}
+
+	suspects := []IntervalKey{
+		{
+			ChanID: 9,
+			From:   createPubkey(firstRelayID),
+			To:     createPubkey(secondRelayID),
+		},
+		{
+			ChanID: 4,
+			From:   createPubkey(secondRelayID),
+			To:     createPubkey(targetNodeID),
+		},
+	}
+
+	report := func(prove bool) *IntervalStore {
+		session, store := newCorridorSession(
+			t, lnwire.NewMSatFromSatoshis(600_000), 1,
+		)
+		for _, key := range intervalRouteKeys(rt) {
+			session.capacities[key] = capacity
+		}
+
+		// Both hops carry a probe derived lower bound covering the
+		// amount, which is what a shifted report leaves behind.
+		for _, key := range suspects {
+			store.RecordProbe(key, amt, capacity)
+		}
+
+		// One of them additionally has a settlement behind it.
+		if prove {
+			store.RecordSettlement(suspects[0], amt, capacity)
+		}
+
+		session.ReportAttemptFailure(0, rt, nil, nil)
+
+		return store
+	}
+
+	// With only probes behind them, both hops stay on the list and both
+	// take a share of the suspicion.
+	store := report(false)
+	for _, key := range suspects {
+		require.NotZero(t, store.Get(key, capacity).SuspectAmt,
+			"channel %v was struck off on a probe", key.ChanID)
+	}
+
+	// With a settlement behind the first, it is struck off, and being the
+	// only suspect left makes the second a certainty by elimination rather
+	// than a suspicion.
+	store = report(true)
+	require.Zero(t, store.Get(suspects[0], capacity).SuspectAmt)
+	require.Zero(t, store.Get(suspects[1], capacity).SuspectAmt)
+	require.NotZero(t, store.Get(suspects[1], capacity).UpperFail)
 }
 
 // TestIntervalQuarantineSubsumedByBound tests that a failure we do trust
@@ -329,5 +508,89 @@ func TestIntervalSessionQuarantinesAmbiguousFailure(t *testing.T) {
 		require.Greater(
 			t, store.Probability(key, 600_000_000, capacity), 0.0,
 		)
+	}
+}
+
+// TestIntervalQuarantineSeverable tests that the quarantine can be switched off
+// without touching anything else. It measured as a null on the tiers built to
+// reward it, so whether it ships is a decision somebody should be able to make
+// with a config field rather than a patch.
+func TestIntervalQuarantineSeverable(t *testing.T) {
+	t.Parallel()
+
+	// The zero value keeps the mechanism on, which is the behaviour every
+	// published measurement of this router was taken with.
+	require.False(t, IntervalConfig{}.DisableQuarantine)
+	require.False(t, DefaultIntervalConfig().DisableQuarantine)
+
+	route := func(disabled bool) (*IntervalStore, []IntervalKey) {
+		session, store := newCorridorSession(
+			t, lnwire.NewMSatFromSatoshis(600_000), 1,
+		)
+		session.cfg.DisableQuarantine = disabled
+
+		// A route with two hops that are not ours, so an unattributable
+		// failure over it has two suspects and neither can be named.
+		rt := &route.Route{
+			TotalAmount:  600_000_000,
+			SourcePubKey: createPubkey(sourceNodeID),
+			Hops: []*route.Hop{
+				{
+					PubKeyBytes:  createPubkey(firstRelayID),
+					ChannelID:    1,
+					AmtToForward: 600_000_000,
+				},
+				{
+					PubKeyBytes: createPubkey(
+						secondRelayID,
+					),
+					ChannelID:    9,
+					AmtToForward: 600_000_000,
+				},
+				{
+					PubKeyBytes:  createPubkey(targetNodeID),
+					ChannelID:    4,
+					AmtToForward: 600_000_000,
+				},
+			},
+		}
+
+		keys := intervalRouteKeys(rt)
+		for _, key := range keys {
+			session.capacities[key] = lnwire.NewMSatFromSatoshis(
+				budgetCapacity,
+			)
+		}
+
+		session.ReportAttemptFailure(0, rt, nil, nil)
+
+		return store, keys
+	}
+
+	capacity := lnwire.NewMSatFromSatoshis(budgetCapacity)
+
+	// On, the suspects carry a discount.
+	store, keys := route(false)
+
+	var suspected int
+	for _, key := range keys {
+		if store.Get(key, capacity).SuspectAmt != 0 {
+			suspected++
+		}
+	}
+	require.NotZero(t, suspected)
+
+	// Off, the store hears nothing at all. Nothing is recorded, so nothing
+	// prices, and the payment falls back to handling the failure with the
+	// penalties that live and die with it.
+	store, keys = route(true)
+
+	require.Zero(t, store.Len())
+	for _, key := range keys {
+		interval := store.Get(key, capacity)
+
+		require.Zero(t, interval.SuspectAmt)
+		require.Zero(t, interval.SuspectWeight)
+		require.False(t, interval.Known)
 	}
 }

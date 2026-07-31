@@ -353,6 +353,33 @@ type LiquidityInterval struct {
 	// gathered ourselves.
 	Restored bool
 
+	// ProvenOK is the largest amount this direction has been watched
+	// actually move, which is to say the largest amount a payment settled
+	// over it. It is the only evidence class strong enough to clear a
+	// suspicion, and nothing but a settlement ever writes it.
+	//
+	// LowerOK is not that, which is the distinction this field exists to
+	// draw. LowerOK also rises when a failure reported by some hop implies
+	// that the hops before it forwarded, and under misattribution that
+	// implication is exactly what breaks: blame shifted downstream puts the
+	// guilty channel before the reported index, so it collects a lower bound
+	// claiming it carried the amount it had in fact just refused. Reading
+	// that as proof of innocence lets the culprit walk out of every
+	// suspicion it should have been held for.
+	//
+	// A settlement proves the forward direction and only the forward
+	// direction. It does move balance to the other side, which is why the
+	// reverse interval slides up, but sliding an interval is an inference
+	// about a balance and this field is a record of something watched. So
+	// the reverse direction is left alone.
+	//
+	// NOTE: this is not persisted. It says a settlement was watched by this
+	// process, and a settlement from before a restart is evidence about a
+	// network that has had the restart to move on. A failure observed now
+	// outranks it, so a restored belief starts with nothing here and earns
+	// it back with the first settlement.
+	ProvenOK lnwire.MilliSatoshi
+
 	// SuspectAmt is the smallest amount that a failure we could not
 	// attribute has named for this channel, and SuspectWeight is how much
 	// corroboration those failures carry between them. Zero means nothing
@@ -376,6 +403,12 @@ type LiquidityInterval struct {
 func (l *LiquidityInterval) markRestored() {
 	l.Restored = true
 	l.Confidence *= intervalRestoredConfidence
+
+	// Proof of a settlement does not survive a restart. It is never written
+	// down, and a belief being seeded in must not carry one regardless of
+	// what the caller handed us, because a settlement from before the
+	// restart says nothing about a failure observed after it.
+	l.ProvenOK = 0
 }
 
 // normalize restores the invariant 0 <= LowerOK <= Estimate < UpperFail <=
@@ -408,15 +441,20 @@ func (l *LiquidityInterval) normalize(capacity lnwire.MilliSatoshi) {
 		}
 	}
 
+	if l.ProvenOK > capacity {
+		l.ProvenOK = capacity
+	}
+
 	if l.SuspectAmt > capacity {
 		l.SuspectAmt = capacity
 	}
 
-	// A channel we have watched carry the suspected amount is a channel the
+	// A channel we have watched settle the suspected amount is a channel the
 	// suspicion was wrong about. This is the contradiction rule, and putting
-	// it here means it fires no matter which observation moved the lower
-	// bound.
-	if l.SuspectAmt != 0 && l.LowerOK >= l.SuspectAmt {
+	// it here means it fires no matter which settlement moved the bound.
+	//
+	// It reads ProvenOK rather than LowerOK on purpose. See ProvenOK.
+	if l.SuspectAmt != 0 && l.ProvenOK >= l.SuspectAmt {
 		l.clearSuspect()
 	}
 
@@ -459,9 +497,9 @@ func (l *LiquidityInterval) clearSuspect() {
 func (l *LiquidityInterval) recordSuspect(amt, capacity lnwire.MilliSatoshi,
 	weight float64) {
 
-	// An amount we have already proven passes is not a suspicion worth
-	// holding.
-	if l.LowerOK >= amt {
+	// An amount we have watched settle over this channel is not a suspicion
+	// worth holding. Only a settlement counts here; see ProvenOK.
+	if l.ProvenOK != 0 && l.ProvenOK >= amt {
 		return
 	}
 
@@ -921,6 +959,13 @@ func (l *LiquidityInterval) recordSettlement(reverse *LiquidityInterval,
 		l.UpperFail -= amt
 	} else {
 		l.UpperFail = 0
+	}
+
+	// This is the only place ProvenOK is ever written. The amount really
+	// moved over this channel in this direction, which is the one claim
+	// strong enough to clear a suspicion.
+	if amt > l.ProvenOK {
+		l.ProvenOK = amt
 	}
 
 	l.Known = true
