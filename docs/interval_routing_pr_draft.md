@@ -92,12 +92,20 @@ Stated plainly, because the evidence above is easy to over-read.
   liquidity family, the amount family and the graph itself did not change the
   ordering, which is evidence against overfitting rather than proof of its
   absence.
-- **One interaction is unexplained.** A degraded-mix tier moves against the
-  router in a way that is under investigation, and the branch ships with it on
-  the record rather than resolved.
+- **One interaction was found, explained and fixed, and the fix is measured on
+  one corpus.** A tier mixing unreadable errors with shifted blame moved against
+  the router. The cause turned out to be the quarantine's trust boundary: a
+  failure that names the wrong hop makes the router write a lower bound on the
+  channel that actually refused, and the quarantine was reading that bound as
+  proof of innocence. Ablation and ground-truth counters pinned it, with 9.6% of
+  promoted bounds on that tier landing on channels that had never failed against
+  0.0% when only unreadable errors were present. Limiting the clearing rule to
+  settlements recovers the tier and leaves the clean tiers identical. The
+  mechanism is established; the magnitude rests on one ten-file corpus, and a
+  wider corpus is pending.
 - **The quarantine mechanism measured as a null** on the tiers built to reward
-  it. It is behind `DisableQuarantine` and can be switched off, or dropped by
-  reverting one commit, without touching anything else.
+  it, before the fix above. It is behind `DisableQuarantine` and can be switched
+  off, or dropped by reverting its commits, without touching anything else.
 - **The beliefs are simulator-shaped in one specific way.** Several constants in
   the probability model were selected by a search against a generator whose
   liquidity distribution the constants then came to fit. The mechanism is what
