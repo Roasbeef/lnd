@@ -267,9 +267,13 @@ channel that lies about where failures happen. That router produced the flattest
 degradation profile the work has measured, but it bought the flatness partly by
 never giving up, and none of it has been measured on a real network. The
 quarantine is held in memory only, as is the record of settlements that clears
-it, since neither survives a restart with its meaning intact. It can be switched
-off with `DisableQuarantine` without touching anything else, and the router then
-handles an unattributable failure entirely within the payment as it did before.
+it, since neither survives a restart with its meaning intact. Nor has it been
+shown to be worth anything: on freshly generated files its effect on the
+objective cannot be separated from zero in either direction, and it is kept
+because the trust boundary it draws is the right one rather than because it
+measurably pays. It can be switched off with `DisableQuarantine` without
+touching anything else, and the router then handles an unattributable failure
+entirely within the payment as it did before.
 
 One promotion case is knowingly left on the floor. When a probe derived lower
 bound lands at exactly the amount an ambiguous failure names, a promoted bound
