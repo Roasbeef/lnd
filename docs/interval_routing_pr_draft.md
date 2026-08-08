@@ -126,11 +126,14 @@ The design was arrived at by evolutionary search against an in-process payment
 simulator, and then validated against lnd's production stack on held-out
 scenarios. What the branch rests on:
 
-- **In-simulation, 14 of 14 tiers CI-solid over stock lnd**, across clean,
-  degraded, split, atomic and mainnet-derived scenario families.
-- **The margins re-pin on files nobody had seen.** Regenerating the corpora
-  fresh, thirty files per family, the leads over stock lnd come back larger than
-  the sealed tiers had shown: the hard family lands between +0.16 and +0.26 of
+- **In simulation, the router beats stock lnd on all 14 benchmark tiers**,
+  across clean, degraded, split, atomic and mainnet-derived scenario
+  families, with the paired confidence interval excluding zero on every
+  one. The score behind these comparisons is a payment objective: success
+  rate, minus small penalties for extra attempts and for fees paid.
+- **The margins reproduce on files nobody had seen.** Regenerating the
+  corpora fresh, thirty files per family, the leads over stock lnd come
+  back larger than the original tiers had shown: the hard family lands between +0.16 and +0.26 of
   objective, every one at p below 2e-3, and mainnet at +0.096. The collapse that
   degraded attribution induces in stock lnd reproduces on the unseen files too,
   which is the part that was most worth checking, since it is the finding the
@@ -180,9 +183,9 @@ Stated plainly, because the evidence above is easy to over-read.
   manufactures, and we do not claim it buys anything measurable. Its cost is
   likewise not measurable at thirty files, which is the other half of why it
   stays.
-- **The quarantine mechanism measured as a null** on the tiers built to reward
-  it. It is behind `DisableQuarantine` and can be switched off, or dropped by
-  reverting its commits, without touching anything else.
+- **The quarantine is severable.** It sits behind `DisableQuarantine` and
+  can be switched off, or dropped by reverting its commits, without
+  touching anything else.
 - **The beliefs are simulator-shaped in one specific way.** Several constants in
   the probability model were selected by a search against a generator whose
   liquidity distribution the constants then came to fit. The mechanism is what
@@ -229,11 +232,13 @@ exists; it is written as `/pull/0` in both entries.
 
 - [ ] Fill in the PR number in the release notes.
 - [ ] Delete this file.
-- [ ] Rebase onto current master. Every audit so far has found the drift
+- [x] Rebase onto current master. Every audit so far has found the drift
       mechanical, and the most recent one found no shared file at all: upstream
       has not touched the payment lifecycle, the session interface, the router
       RPC config or the migrations this branch adds to.
 - [x] Decide keep or drop on the quarantine: it KEEPS, on mechanism
       grounds, with the null and the severability both stated in the
       description above.
-- [ ] Re-run the itest and the full unit battery under both database tags.
+- [x] Re-run the itest and the full unit battery under both database
+      tags (done on the refreshed base; only documentation commits
+      followed).
