@@ -196,6 +196,48 @@ at a time and dispatches one HTLC, or hash time locked contract, at a time. The
 shard size simply rides back on the route, since `registerAttempt` already
 reads `ReceiverAmt()` to decide whether a shard is the last one.
 
+## A payment, end to end
+
+The pieces above are easiest to see moving together. Suppose a node with the
+router enabled sends 500,000 satoshis to a destination four hops away, over
+channels it has never used, and suppose the true bottleneck is the third hop,
+which holds 250,000.
+
+The first route request builds the shard ladder. Nothing has failed yet, so
+the ladder's informative rungs are the whole amount and a handful of
+divisions; the whole amount scores best, and the search returns a four hop
+route for 500,000. The attempt fails at hop three, and the failure names it.
+
+Three things are written before the next request. Hop three's forward
+direction takes `UpperFail = 500,000`: not a penalty, a ceiling. Hops one and
+two forwarded, so their forward directions take `LowerOK = 500,000` and their
+reverse directions learn the complementary bound. And hop three's reverse
+direction takes `LowerOK = 500,000`, because the liquidity that was not there
+to send is there to send back.
+
+The second route request now behaves differently in two ways at once. The
+ladder contains 499,999 divided down: 249,999 and 166,666 are rungs, put
+there directly by the failure, not reached by halving. And the search still
+considers hop three for those smaller amounts, because a 250,000 shard sits
+below no bound the model holds; the stock router would be routing around that
+channel entirely, at every amount, for the length of a half-life. Say the
+249,999 rung wins with the same route. It succeeds, the destination still
+needs the rest, and the settlement slides hop three's forward interval down by
+what just moved through it.
+
+The remaining 250,001 goes out on the next request the same way, over that
+route or a better one, and the payment completes with three attempts. Every
+bound written along the way outlives the payment: the next payment through
+this corridor starts from what this one learned, and what it learned survives
+a restart on nodes running the native SQL backend, in the clamped form the
+limitations section describes.
+
+The same trace under the stock router reads differently at each step: the
+failure penalizes the pair both ways, the retry halves 500,000 to 250,000 by
+schedule rather than by evidence, and whether hop three is even considered
+again depends on how much of its penalty has decayed, which is a function of
+wall-clock time and not of anything the network said.
+
 ## Living alongside mission control
 
 Turning the interval router on does not turn mission control off. Mission
@@ -216,6 +258,35 @@ a node running the native SQL backend the store also writes its beliefs down
 and reads them back at startup. Elsewhere it is memory only and the router
 starts cold after a restart.
 
+## Persistence and restarts
+
+The store holds at most 10,000 directed-channel entries in memory
+(`DefaultMaxIntervalHistory`), evicting the least recently written when full,
+so its footprint is bounded no matter how long the node runs or how large the
+graph grows.
+
+On a node running the native SQL backend, the store also writes its beliefs
+down. Writes are batched: a dirty entry waits at most the flush interval,
+one second by default, before it reaches the `liquidity_intervals` table the
+branch's migration adds. The interval is a config knob
+(`routerrpc.intervalflushinterval`) because the right cadence is a judgment
+about the node: a busy router may prefer a longer interval to cut write
+amplification, and the cost of a longer interval is only the beliefs learned
+in the final unflushed seconds before an unclean shutdown.
+
+At startup the store reads the table back and clamps everything it finds, as
+the limitations section describes: restored bounds say likely and unlikely
+rather than proven and impossible, and confidence is halved. Two kinds of
+in-memory evidence are deliberately never written down. The quarantine is
+not, because a suspicion restored from disk is one that nothing since could
+have cleared. The settlement record that clears suspicions is not, because a
+settlement from before a restart should not vouch for a channel today. Both
+rules are the same instinct: fresh evidence outranks stored evidence, and
+stored evidence never gets to overrule a live observation.
+
+On the kv backends there is no table to write to, so the router simply starts
+cold after a restart. Nothing else changes.
+
 ## Turning it on
 
 ```
@@ -225,7 +296,31 @@ routerrpc.router=interval
 
 The other value is `default`, the stock stack, and it is what a node that says
 nothing gets. With the flag off, none of the code described here is even
-constructed.
+constructed: the server builds the same session source it always did, and the
+result-reporting seam is a type assertion the stock session does not satisfy.
+
+The full config surface:
+
+| Option | Default | What it does |
+|---|---|---|
+| `routerrpc.router` | `default` | selects the routing engine |
+| `routerrpc.intervalflushinterval` | `1s` | belief write-back cadence |
+
+`routerrpc.router=interval` enables everything this document describes. The
+flush interval is how long a changed belief may wait before it is written to
+the database, and it is only meaningful with the flag on and the native SQL
+backend.
+
+One further switch lives in code rather than in the config file:
+`IntervalConfig.DisableQuarantine` turns off the quarantine for ambiguous
+failures while leaving every other mechanism in place. It exists so that the
+one component validated only in simulation can be severed without touching
+anything else.
+
+Turning the router off again is safe at any time. The stored beliefs remain
+in the database and are simply not read; mission control's history was being
+maintained the whole time, so the stock router resumes exactly where it would
+have been.
 
 ## Limitations
 
@@ -300,6 +395,24 @@ payment simulator, scored on a real 12,000 node mainnet graph snapshot and on
 synthetic topologies. They are documented for what they do rather than for why
 those particular numbers are right, because for most of them nobody can say.
 Some are surely fitted to the simulator that produced them.
+
+## Where the design came from
+
+The design was found by search rather than invented. We built a payment
+simulator with hidden per-channel balances and real forwarding checks, then
+ran an evolutionary search over whole routing algorithms, scored purely on
+payment outcomes, with lnd's production stack as the baseline. Across dozens
+of independent runs, every winning candidate converged on the same three
+decisions: drop the per-pair penalties, drop time decay, keep per-direction
+liquidity intervals. The code in this branch is a hand-written distillation
+of that consensus into lnd's real payment lifecycle, hardened by several
+rounds of adversarial benchmarking that each found and fixed a real bug
+before the branch was called done.
+
+That history cuts both ways, and the limitations above say where. The
+mechanisms transferred to every world the simulator could build, including a
+channel graph generated outside this work entirely; the constants are the
+part that may be shaped by the simulator that selected them.
 
 ## Where the code lives
 

@@ -10,34 +10,90 @@ reader-facing explanation lives in `docs/interval_routing.md`.
 
 ## Description
 
-In this PR, we add a second way for lnd to choose a route, selectable with
-`routerrpc.router=interval` and off by default.
+In this PR, we add a second routing engine to lnd, selectable with
+`routerrpc.router=interval` and off by default. It replaces the way lnd
+learns from payment results, and it leaves everything else (the payment
+lifecycle, HTLC dispatch, mission control's history and RPCs) exactly as
+it is today.
 
-The stock router asks whether the graph can carry an amount that was fixed
-before path finding began, and halves the amount when the answer is no. This one
-asks what the network will accept and picks the amount and the route together.
-Everything else follows from that.
+### How it improves on the current algorithm
 
-In place of mission control's penalty per node pair, decaying on a half life, it
-keeps a liquidity interval per directed channel: the largest amount it has
-watched pass, the smallest it has watched fail, and an estimate in between.
-There is no clock anywhere in the model. Every observation writes both
-directions, because liquidity not on one side of a funding output is on the
-other, which is an inference mission control does not make. A failure records
-an amount rather than a verdict, so a channel that just refused 400,000
-satoshis is still the obvious way to send 40,000, with no penalty to wait out.
+Today, lnd learns from a failed payment by penalizing a node pair. Mission
+control records the failure, a half-life timer fades the penalty, and path
+finding avoids the pair until enough time has passed. The amount is chosen
+before the search begins: path finding answers "can the graph carry X," and
+when the answer is no, the payment loop halves X and searches again.
 
-Splitting is planned rather than reactive. For one route request the session
-builds a ladder of candidate shard sizes, finds a route for each, and takes the
-best pairing of the two. The ladder includes sizes derived from amounts this
-payment has already proven do not fit, which is the part that makes it more than
-a reordering of the halving loop.
+The interval router keeps a different memory. For each channel, in each
+direction, it tracks a _liquidity interval_: the largest amount it has
+watched succeed, the smallest amount it has watched fail, and an estimate
+in between. Three practical differences follow from that one change.
 
-The payment lifecycle is untouched. It still asks for one route at a time and
-dispatches one HTLC at a time; the shard size rides back on the route, since
-`registerAttempt` already reads `ReceiverAmt()`. Mission control keeps running
-alongside, keeps its history and its RPCs, and still decides whether a failure
-is terminal. Only the choice of route changes.
+First, a failure records an amount, not a verdict. A channel that just
+refused 400,000 sats is still the obvious way to send 40,000, so the
+router keeps using it below the bound instead of routing around it for
+every amount. There is no clock anywhere in the model, because a bound
+does not need to be forgiven; it needs to be contradicted by a newer
+observation.
+
+Second, every observation teaches both directions. Liquidity that is
+missing on one side of a funding output sits on the other side, so a
+failure toward a peer is also evidence about the path back. Mission
+control never draws that inference, and it is free information: in our
+measurements it accounts for roughly half of the reduction in payment
+attempts.
+
+Third, splitting is planned rather than reactive. For each route request
+the session builds a ladder of candidate shard sizes, including sizes
+derived from amounts this payment has already proven do not fit, finds a
+route for each rung, and takes the best pairing. The halving loop
+discovers a workable size by failing toward it; the interval router
+computes one from the bounds it already holds.
+
+The gains show up where knowledge matters. On a simulated snapshot of the
+real graph (12,161 nodes, real channel policies), the interval router
+completes payments with 2.5 attempts on average where stock lnd needs
+19.8, at a higher success rate. Under realistic error attribution, where
+a fraction of failures are unreadable, stock lnd's give-up rate more than
+doubles while the interval router's success holds flat: penalizing a
+whole route in both directions for an error nobody can read turns out to
+be the single most expensive habit in the current design. And because the
+search prices fees against the payment's actual remaining budget, the fee
+limit can bind during path finding rather than being discovered when a
+route is rejected.
+
+### How it was developed
+
+The design was not sketched on a whiteboard; it was found by search, then
+rebuilt by hand.
+
+We first built a payment simulator into this codebase: hidden per-channel
+balances, real forwarding checks, seeded graphs, and a router interface
+that owns both route selection and splitting. We then ran an evolutionary
+search (LLM-driven program synthesis, scored only by simulated payment
+outcomes) over whole routing algorithms, with lnd's production stack as
+the baseline. Across dozens of independent runs and more than thirty
+controlled experiments, every winning candidate converged on the same
+paradigm: drop the per-pair penalties, drop time decay, and keep
+per-direction liquidity intervals instead.
+
+The code in this branch is not machine-written. We distilled the paradigm
+into a hand-written implementation inside lnd's real payment lifecycle,
+then spent six adversarial benchmark rounds trying to break it. Those
+rounds caught real bugs (a fee term whose units meant no budget could
+ever bind, a classifier that read a budget's remainder as its existence,
+and a subtle case where misattributed failures manufactured false
+evidence of a channel's health), and each fix was validated against the
+same battery before it stayed. The final configuration beats stock lnd on
+all fourteen simulated benchmark tiers with zero losses, holds its
+margins under lnd's default fee limits, and reproduces its lead on an
+externally generated graph whose balance distribution none of our tools
+ever fit.
+
+Every number above comes from a simulator, and the limitations section
+below says so plainly. The simulator, corpora, and experiment writeups
+live in a research fork and are deliberately not part of this PR; this
+branch carries only the router, its tests, and its documentation.
 
 ### What is in the branch
 
@@ -177,5 +233,7 @@ exists; it is written as `/pull/0` in both entries.
       mechanical, and the most recent one found no shared file at all: upstream
       has not touched the payment lifecycle, the session interface, the router
       RPC config or the migrations this branch adds to.
-- [ ] Decide keep or drop on the quarantine.
+- [x] Decide keep or drop on the quarantine: it KEEPS, on mechanism
+      grounds, with the null and the severability both stated in the
+      description above.
 - [ ] Re-run the itest and the full unit battery under both database tags.
