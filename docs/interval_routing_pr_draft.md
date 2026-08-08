@@ -59,6 +59,10 @@ In dependency order, which is also the order to review:
 6. Persistence to the native SQL store, with a new `liquidity_intervals` table.
 7. Pricing a shard against HTLCs we already hold on interior channels.
 8. A budget derived exchange rate between fees and reliability.
+9. A quarantine for failures that cannot say where they happened, and the trust
+   boundary that decides what may release one. This is the part with the most
+   argument behind it and the least measured gain; the two sections below say
+   why it is here anyway.
 
 ### Evidence
 
@@ -163,14 +167,15 @@ this line of work, and is the place to start.
 
 Already in `docs/release-notes/release-notes-0.22.0.md` under Functional
 Enhancements and Database. The pull request number needs filling in once it
-exists; it is written as `/pull/0` in three places.
+exists; it is written as `/pull/0` in both entries.
 
 ## Before opening
 
 - [ ] Fill in the PR number in the release notes.
 - [ ] Delete this file.
-- [ ] Rebase onto current master. The last audit found the drift mechanical:
-      one shared file, `itest/list_on_test.go`, with the hunks hundreds of lines
-      apart.
+- [ ] Rebase onto current master. Every audit so far has found the drift
+      mechanical, and the most recent one found no shared file at all: upstream
+      has not touched the payment lifecycle, the session interface, the router
+      RPC config or the migrations this branch adds to.
 - [ ] Decide keep or drop on the quarantine.
 - [ ] Re-run the itest and the full unit battery under both database tags.
