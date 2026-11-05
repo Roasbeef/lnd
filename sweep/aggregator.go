@@ -152,25 +152,11 @@ func (b *BudgetAggregator) createInputSets(inputs []SweeperInput,
 	// sets holds the InputSets that we will return.
 	sets := make([]InputSet, 0)
 
-	// Copy the inputs to a new slice so we can modify it.
-	remainingInputs := make([]SweeperInput, len(inputs))
-	copy(remainingInputs, inputs)
-
-	// If the number of inputs is greater than the max inputs allowed, we
-	// will split them into smaller clusters.
-	for uint32(len(remainingInputs)) > b.maxInputs {
-		log.Tracef("Cluster has %v inputs, max is %v, dividing...",
-			len(inputs), b.maxInputs)
-
-		// Copy the inputs to be put into the new set, and update the
-		// remaining inputs by removing currentInputs.
-		currentInputs := make([]SweeperInput, b.maxInputs)
-		copy(currentInputs, remainingInputs[:b.maxInputs])
-		remainingInputs = remainingInputs[b.maxInputs:]
-
-		// Create an InputSet using the max allowed number of inputs.
+	// Split the inputs so that each set stays within the max number of
+	// inputs and the max weight allowed.
+	for _, chunk := range b.splitInputs(inputs) {
 		set, err := NewBudgetInputSet(
-			currentInputs, deadlineHeight, b.auxSweeper,
+			chunk, deadlineHeight, b.auxSweeper,
 		)
 		if err != nil {
 			log.Errorf("unable to create input set: %v", err)
@@ -181,20 +167,75 @@ func (b *BudgetAggregator) createInputSets(inputs []SweeperInput,
 		sets = append(sets, set)
 	}
 
-	// Create an InputSet from the remaining inputs.
-	if len(remainingInputs) > 0 {
-		set, err := NewBudgetInputSet(
-			remainingInputs, deadlineHeight, b.auxSweeper,
-		)
-		if err != nil {
-			log.Errorf("unable to create input set: %v", err)
-			return nil
+	return sets
+}
+
+// splitInputs splits the inputs, in order, into chunks that each hold at most
+// maxInputs inputs, and whose estimated weight stays within
+// maxInputSetWeight. The weight bound leaves room for the wallet inputs that
+// may be needed to fund the sweep, so an input set never produces a sweep
+// transaction above the standardness weight limit.
+func (b *BudgetAggregator) splitInputs(
+	inputs []SweeperInput) [][]SweeperInput {
+
+	var (
+		chunks  [][]SweeperInput
+		current []SweeperInput
+
+		// estimator tracks the weight of the current chunk.
+		estimator input.TxWeightEstimator
+	)
+
+	for _, inp := range inputs {
+		trial := estimator
+		addSweepInputWeight(&trial, inp)
+
+		// Start a new chunk if this input would exceed either limit
+		// of the current one.
+		full := uint32(len(current)) >= b.maxInputs ||
+			trial.Weight() > maxInputSetWeight
+
+		if len(current) > 0 && full {
+			log.Tracef("Input set has %v inputs with weight %v, "+
+				"max is %v inputs or weight %v, dividing...",
+				len(current), estimator.Weight(), b.maxInputs,
+				maxInputSetWeight)
+
+			chunks = append(chunks, current)
+			current = nil
+
+			trial = input.TxWeightEstimator{}
+			addSweepInputWeight(&trial, inp)
 		}
 
-		sets = append(sets, set)
+		current = append(current, inp)
+		estimator = trial
 	}
 
-	return sets
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+
+	return chunks
+}
+
+// addSweepInputWeight adds the weight of the given input, and of its required
+// output if it has one, to the weight estimator. Inputs that cannot be
+// weighted add nothing, as the sweep transaction skips them too.
+func addSweepInputWeight(estimator *input.TxWeightEstimator,
+	inp SweeperInput) {
+
+	err := inp.WitnessType().AddWeightEstimation(estimator)
+	if err != nil {
+		log.Errorf("Failed to get weight estimate for input=%v: %v",
+			inp.OutPoint(), err)
+
+		return
+	}
+
+	if txOut := inp.RequiredTxOut(); txOut != nil {
+		estimator.AddTxOutput(txOut)
+	}
 }
 
 // filterInputs filters out inputs that have,

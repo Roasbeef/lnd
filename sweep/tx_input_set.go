@@ -148,6 +148,12 @@ const (
 	// extra outputs added by the aux sweeper.
 	sweepTxWeightMargin = lntypes.WeightUnit(1_000)
 
+	// maxInputSetWeight is the max estimated weight of the inputs the
+	// aggregator puts into a single input set. It's half the standardness
+	// weight limit, which leaves the other half for the wallet inputs that
+	// may be needed to fund the sweep.
+	maxInputSetWeight = maxStandardTxWeight / 2
+
 	// maxWalletInputs is the max number of wallet inputs added to a single
 	// input set, matching the default max number of inputs the aggregator
 	// puts into a set. Together with the weight limit, it bounds the size

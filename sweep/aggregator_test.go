@@ -384,6 +384,15 @@ func TestBudgetAggregatorCreateInputSets(t *testing.T) {
 		},
 	}
 
+	// Mock the methods used to weight the inputs when splitting them into
+	// input sets.
+	for _, inp := range []*input.MockInput{
+		mockInput1, mockInput2, mockInput3, mockInput4,
+	} {
+		inp.On("WitnessType").Return(input.CommitmentAnchor).Maybe()
+		inp.On("RequiredTxOut").Return(nil).Maybe()
+	}
+
 	// Create a budget aggregator with max number of inputs set to 2.
 	b := NewBudgetAggregator(nil, 2, fn.None[AuxSweeper]())
 
@@ -513,6 +522,10 @@ func TestBudgetInputSetClusterInputs(t *testing.T) {
 	inpSize := lntypes.VByte(input.InputSize).ToWU() + wu
 
 	wt.On("String").Return("mock witness type")
+
+	// Mock the weight estimation used when splitting the inputs into
+	// weight-bounded input sets.
+	wt.On("AddWeightEstimation").Return(nil).Maybe()
 
 	// Mock the estimator to return a constant fee rate.
 	const minFeeRate = chainfee.SatPerKWeight(1000)
@@ -771,4 +784,54 @@ func TestSplitOnLocktime(t *testing.T) {
 	}
 	require.Len(t, result[uint32(0)], 2)
 	require.Equal(t, expectedResult, result)
+}
+
+// TestBudgetAggregatorSplitInputsByWeight checks that inputs are split into
+// chunks whose estimated weight stays within maxInputSetWeight, even when the
+// max number of inputs is not reached.
+func TestBudgetAggregatorSplitInputsByWeight(t *testing.T) {
+	t.Parallel()
+
+	const numInputs = 1_000
+
+	// Each input is a P2WKH input with a P2WSH required output.
+	mockInput := &input.MockInput{}
+	defer mockInput.AssertExpectations(t)
+
+	mockInput.On("WitnessType").Return(input.WitnessKeyHash)
+	mockInput.On("RequiredTxOut").Return(&wire.TxOut{
+		PkScript: make([]byte, input.P2WSHSize),
+	})
+
+	inputs := make([]SweeperInput, 0, numInputs)
+	for i := range numInputs {
+		inputs = append(inputs, SweeperInput{
+			Input: mockInput,
+			params: Params{
+				Budget: btcutil.Amount(i),
+			},
+		})
+	}
+
+	// Allow more inputs per set than we have, so only the weight limit
+	// splits them.
+	b := NewBudgetAggregator(nil, numInputs+1, fn.None[AuxSweeper]())
+	chunks := b.splitInputs(inputs)
+	require.Greater(t, len(chunks), 1)
+
+	// Every chunk stays within the weight limit, and the inputs keep
+	// their order across the chunks.
+	var next int
+	for _, chunk := range chunks {
+		var estimator input.TxWeightEstimator
+		for _, inp := range chunk {
+			addSweepInputWeight(&estimator, inp)
+
+			require.Equal(t, inputs[next].params, inp.params)
+			next++
+		}
+
+		require.LessOrEqual(t, estimator.Weight(), maxInputSetWeight)
+	}
+	require.Equal(t, numInputs, next)
 }
