@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
@@ -36,8 +37,12 @@ type InputSet interface {
 
 	// AddWalletInputs adds wallet inputs to the set until a non-dust
 	// change output can be made. Return an error if there are not enough
-	// wallet inputs.
-	AddWalletInputs(wallet Wallet) error
+	// wallet inputs. startFeeRate is the fee rate the sweep transaction
+	// will first be published at, and maxFeeRate is the maximum fee rate
+	// the sweeper is allowed to use when fee bumping it. Both are used to
+	// decide whether a wallet UTXO is economical to add.
+	AddWalletInputs(wallet Wallet, startFeeRate,
+		maxFeeRate chainfee.SatPerKWeight) error
 
 	// NeedWalletInput returns true if the input set needs more wallet
 	// inputs.
@@ -131,6 +136,24 @@ var _ InputSet = (*BudgetInputSet)(nil)
 
 // errEmptyInputs is returned when the input slice is empty.
 var errEmptyInputs = fmt.Errorf("inputs slice is empty")
+
+const (
+	// maxStandardTxWeight is the maximum weight a transaction may have to
+	// be accepted into the mempool under the default standardness policy.
+	// It mirrors btcd's unexported maxStandardTxWeight.
+	maxStandardTxWeight = lntypes.WeightUnit(400_000)
+
+	// sweepTxWeightMargin is the weight reserved for transaction outputs
+	// that are not yet known when wallet inputs are selected, such as
+	// extra outputs added by the aux sweeper.
+	sweepTxWeightMargin = lntypes.WeightUnit(1_000)
+
+	// maxWalletInputs is the max number of wallet inputs added to a single
+	// input set, matching the default max number of inputs the aggregator
+	// puts into a set. Together with the weight limit, it bounds the size
+	// of a sweep funded by a wallet holding many small UTXOs.
+	maxWalletInputs = 100
+)
 
 // validateInputs is used when creating new BudgetInputSet to ensure there are
 // no duplicate inputs and they all share the same deadline heights, if set.
@@ -335,6 +358,20 @@ func (b *BudgetInputSet) hasNormalInput() bool {
 	return false
 }
 
+// walletCandidate is a wallet UTXO considered for a budget input set, along
+// with the weight it adds to the sweep transaction.
+type walletCandidate struct {
+	utxo   *lnwallet.Utxo
+	input  input.Input
+	weight lntypes.WeightUnit
+}
+
+// density returns the candidate's value per weight unit, which is the highest
+// fee rate at which the candidate still pays for its own input weight.
+func (c walletCandidate) density() chainfee.SatPerKWeight {
+	return chainfee.NewSatPerKWeight(c.utxo.Value, c.weight)
+}
+
 // AddWalletInputs adds wallet inputs to the set until the specified budget is
 // met. When sweeping inputs with required outputs, although there's budget
 // specified, it cannot be directly spent from these required outputs. Instead,
@@ -343,11 +380,22 @@ func (b *BudgetInputSet) hasNormalInput() bool {
 // we are calling this method, it means other inputs cannot cover the specified
 // budget, so we need to borrow from wallet utxos.
 //
+// Wallet UTXOs are considered in order of value per weight unit, highest
+// first, and a UTXO is only added if it raises the highest fee rate the sweep
+// can be published at. That rate is the funds available for fees divided by
+// the transaction weight, capped by the budget and maxFeeRate. A UTXO is also
+// never added if it cannot pay for its own input weight at startFeeRate, the
+// fee rate the first broadcast will use, as it cannot help get the sweep
+// published. This keeps the selection small and prevents UTXOs that are worth
+// less than the fee to spend them, such as dust, from being swept.
+//
 // Return an error if there are not enough wallet inputs, and the budget set is
 // set to its initial state by removing any wallet inputs added.
 //
 // NOTE: must be called with the wallet lock held via `WithCoinSelectLock`.
-func (b *BudgetInputSet) AddWalletInputs(wallet Wallet) error {
+func (b *BudgetInputSet) AddWalletInputs(wallet Wallet, startFeeRate,
+	maxFeeRate chainfee.SatPerKWeight) error {
+
 	// Retrieve wallet utxos. Only consider confirmed utxos to prevent
 	// problems around RBF rules for unconfirmed inputs. This currently
 	// ignores the configured coin selection strategy.
@@ -358,27 +406,132 @@ func (b *BudgetInputSet) AddWalletInputs(wallet Wallet) error {
 		return fmt.Errorf("list unspent witness: %w", err)
 	}
 
-	// Sort the UTXOs largest first so the fewest inputs cover the budget.
-	// This avoids producing an oversized sweep or limiting its fee rate when
-	// the wallet contains many small UTXOs.
+	// Seed a weight estimate with the set's existing inputs and reserve an
+	// output for the sweep destination. This keeps the transaction below
+	// the standardness weight limit as wallet inputs are added.
 	//
-	// TODO(yy): add more choices to CoinSelectionStrategy and use the
-	// configured value here.
-	sort.Slice(utxos, func(i, j int) bool {
-		return utxos[i].Value > utxos[j].Value
-	})
+	// The estimator's fee rate only decides which unconfirmed parents are
+	// counted, as it skips parents paying at least that rate. We use
+	// maxFeeRate rather than startFeeRate, since fee bumps can raise the
+	// child's fee rate up to maxFeeRate, at which point any parent paying
+	// less still needs the CPFP and its weight must shape the selection.
+	estimator := newWeightEstimator(maxFeeRate, 0)
+	for _, inp := range b.inputs {
+		if err := estimator.add(inp.Input); err != nil {
+			// Skip inputs that cannot be weighted, the same way the
+			// tx generator treats them. They are accounted for by
+			// the weight margin.
+			log.Errorf("Failed to get weight estimate for "+
+				"input=%v: %v", inp.OutPoint(), err)
 
-	// Add wallet inputs to the set until the specified budget is covered.
+			continue
+		}
+
+		if txOut := inp.RequiredTxOut(); txOut != nil {
+			estimator.addOutput(txOut)
+		}
+	}
+	estimator.addP2TROutput()
+
+	// Measure the weight each UTXO adds to the transaction, without
+	// mutating the estimator.
+	candidates := make([]walletCandidate, 0, len(utxos))
 	for _, utxo := range utxos {
-		err := b.addWalletInput(utxo)
+		inp, err := createWalletTxInput(utxo)
 		if err != nil {
 			return err
 		}
+
+		trial := estimator.estimator
+		err = inp.WitnessType().AddWeightEstimation(&trial)
+		if err != nil {
+			return fmt.Errorf("estimate wallet input weight: %w",
+				err)
+		}
+
+		candidates = append(candidates, walletCandidate{
+			utxo:   utxo,
+			input:  inp,
+			weight: trial.Weight() - estimator.weight(),
+		})
+	}
+
+	// Consider the UTXOs with the highest value per weight unit first. For
+	// UTXOs of the same address type this is largest first, so the fewest
+	// inputs cover the budget.
+	//
+	// TODO(yy): add more choices to CoinSelectionStrategy and use the
+	// configured value here.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].density() > candidates[j].density()
+	})
+
+	// spendable tracks the value of the set's inputs that can pay fees.
+	// It's only needed when there are wallet UTXOs to consider.
+	var spendable btcutil.Amount
+	if len(candidates) > 0 {
+		spendable = b.spendableAmt()
+	}
+
+	maxWeight := maxStandardTxWeight - sweepTxWeightMargin
+
+	var (
+		skipped int
+		added   int
+	)
+	for _, c := range candidates {
+		// Stop adding wallet inputs once the max number of wallet
+		// inputs has been reached.
+		if added >= maxWalletInputs {
+			log.Warnf("Stopped adding wallet inputs: reached max "+
+				"of %v wallet inputs", maxWalletInputs)
+
+			break
+		}
+
+		weight := estimator.weight()
+
+		// Stop adding wallet inputs once the transaction would exceed
+		// the standardness weight limit.
+		if weight+c.weight > maxWeight {
+			log.Warnf("Stopped adding wallet inputs: tx weight %v "+
+				"would exceed %v", weight+c.weight, maxWeight)
+
+			break
+		}
+
+		// Only add the UTXO if it raises the fee rate the sweep can
+		// reach, and pays for itself at the starting fee rate.
+		minRate := b.walletInputFeeRate(
+			weight, spendable, estimator.parentsFee,
+			estimator.parentsWeight, startFeeRate, maxFeeRate,
+		)
+		if c.density() <= minRate {
+			skipped++
+
+			continue
+		}
+
+		if err := estimator.add(c.input); err != nil {
+			return fmt.Errorf("estimate wallet input weight: %w",
+				err)
+		}
+
+		if err := b.addWalletInput(c.utxo); err != nil {
+			return err
+		}
+		spendable += c.utxo.Value
+		added++
 
 		// Return if we've reached the minimum output amount.
 		if !b.NeedWalletInput() {
 			return nil
 		}
+	}
+
+	if skipped > 0 {
+		log.Debugf("Skipped %v wallet utxos that cannot raise the fee "+
+			"rate of the sweep", skipped)
 	}
 
 	// Exit if there are no inputs can contribute to the fees.
@@ -397,6 +550,82 @@ func (b *BudgetInputSet) AddWalletInputs(wallet Wallet) error {
 		spendable, total, budget-spendable)
 
 	return nil
+}
+
+// walletInputFeeRate returns the fee rate a wallet UTXO must exceed, per
+// weight unit it adds, to be worth adding to a set of the given weight whose
+// inputs that can pay fees are worth spendable.
+//
+// The fee bumper can raise the sweep's fee rate up to the budget divided by
+// the transaction weight, capped by maxFeeRate, but only as far as the
+// set's spendable funds allow. A UTXO raises that reachable fee rate only if
+// its value per weight unit exceeds it. The rate is floored at the starting
+// fee rate, capped the same way, as a UTXO that cannot pay for itself there
+// cannot help get the sweep published.
+//
+// When the sweep is a CPFP child of unconfirmed parents, what matters is the
+// fee rate of the whole package, as the parents usually dominate its weight.
+// The reachable rate is then the child's highest affordable fee plus the
+// parents' fee, divided by the combined weight. This rate is far lower than
+// the child's own fee rate, so UTXOs that raise the package's fee rate are
+// still added even when they would lower the child's.
+func (b *BudgetInputSet) walletInputFeeRate(weight lntypes.WeightUnit,
+	spendable, parentsFee btcutil.Amount, parentsWeight lntypes.WeightUnit,
+	startFeeRate,
+	maxFeeRate chainfee.SatPerKWeight) chainfee.SatPerKWeight {
+
+	// The highest fee rate the budget allows.
+	ceiling := chainfee.NewSatPerKWeight(b.Budget(), weight)
+	if ceiling > maxFeeRate {
+		ceiling = maxFeeRate
+	}
+
+	// The highest fee rate the set's spendable funds can pay for.
+	reachable := chainfee.NewSatPerKWeight(spendable, weight)
+	if reachable > ceiling {
+		reachable = ceiling
+	}
+
+	// For a CPFP child, measure the reachable rate over the package. The
+	// fee bumper charges the child's fee rate on the child's weight only,
+	// so the child's highest fee is capped the same way as above. If the
+	// parents pay more than the child, miners take them on their own and
+	// then judge the child by its own fee rate, so we use the lower of the
+	// two rates.
+	if parentsWeight > 0 {
+		childFee := min(spendable, ceiling.FeeForWeight(weight))
+		pkgRate := chainfee.NewSatPerKWeight(
+			childFee+parentsFee, weight+parentsWeight,
+		)
+		reachable = min(reachable, pkgRate)
+	}
+
+	// The fee rate the first broadcast will use.
+	start := startFeeRate
+	if start > ceiling {
+		start = ceiling
+	}
+
+	if reachable > start {
+		return reachable
+	}
+
+	return start
+}
+
+// spendableAmt returns the total value of the set's inputs that can pay fees,
+// which are the inputs without a required output.
+func (b *BudgetInputSet) spendableAmt() btcutil.Amount {
+	var spendable btcutil.Amount
+	for _, inp := range b.inputs {
+		if inp.RequiredTxOut() != nil {
+			continue
+		}
+
+		spendable += btcutil.Amount(inp.SignDesc().Output.Value)
+	}
+
+	return spendable
 }
 
 // Budget returns the total budget of the set.

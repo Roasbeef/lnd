@@ -1604,7 +1604,10 @@ func (s *UtxoSweeper) sweepPendingInputs(inputs InputsMap) {
 	sweepWithLock := func(set InputSet) error {
 		return s.cfg.Wallet.WithCoinSelectLock(func() error {
 			// Try to add inputs from our wallet.
-			err := set.AddWalletInputs(s.cfg.Wallet)
+			err := set.AddWalletInputs(
+				s.cfg.Wallet, s.startingFeeRate(set),
+				s.cfg.MaxFeeRate.FeePerKWeight(),
+			)
 			if err != nil {
 				return err
 			}
@@ -1634,6 +1637,55 @@ func (s *UtxoSweeper) sweepPendingInputs(inputs InputsMap) {
 			log.Errorf("Failed to sweep %v: %v", set, err)
 		}
 	}
+}
+
+// startingFeeRate returns the fee rate the fee bumper will first publish the
+// sweep transaction of the given set at. It mirrors the linear fee function:
+// the set's starting fee rate is used if specified, otherwise the fee rate is
+// estimated from the blocks left until the set's deadline. The returned rate
+// is not capped by the set's budget, which is left to the caller.
+func (s *UtxoSweeper) startingFeeRate(set InputSet) chainfee.SatPerKWeight {
+	return set.StartingFeeRate().UnwrapOrFunc(
+		func() chainfee.SatPerKWeight {
+			return s.estimateStartingFeeRate(set.DeadlineHeight())
+		},
+	)
+}
+
+// estimateStartingFeeRate estimates the fee rate the linear fee function
+// starts at for a sweep with the given deadline height.
+func (s *UtxoSweeper) estimateStartingFeeRate(
+	deadline int32) chainfee.SatPerKWeight {
+
+	maxFeeRate := s.cfg.MaxFeeRate.FeePerKWeight()
+	confTarget := calcCurrentConfTarget(s.currentHeight, deadline)
+
+	switch {
+	// The fee function uses the max fee rate immediately when the
+	// deadline is one block away or has been reached.
+	case confTarget <= 1:
+		return maxFeeRate
+
+	// The fee function uses the min relay fee when the deadline is beyond
+	// the max block target.
+	case confTarget >= chainfee.MaxBlockTarget:
+		return s.relayFeeRate
+	}
+
+	feeRate, err := s.cfg.FeeEstimator.EstimateFeePerKW(confTarget)
+	if err != nil {
+		log.Warnf("Unable to estimate fee rate for conf target %v, "+
+			"using min relay fee %v: %v", confTarget,
+			s.relayFeeRate, err)
+
+		return s.relayFeeRate
+	}
+
+	if feeRate < s.relayFeeRate {
+		return s.relayFeeRate
+	}
+
+	return feeRate
 }
 
 // bumpResp wraps the result of a bump attempt returned from the fee bumper and

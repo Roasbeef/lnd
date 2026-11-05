@@ -632,6 +632,7 @@ func TestSweepPendingInputs(t *testing.T) {
 				DeliveryAddress: testPubKey.SerializeCompressed(),
 			})
 		},
+		MaxFeeRate:           DefaultMaxFeeRate,
 		NoDeadlineConfTarget: uint32(DefaultDeadlineDelta),
 	})
 
@@ -642,9 +643,14 @@ func TestSweepPendingInputs(t *testing.T) {
 	setNeedWallet := &MockInputSet{}
 	defer setNeedWallet.AssertExpectations(t)
 
-	// Mock this set to ask for wallet input.
+	// Mock this set to ask for wallet input. The set has no starting fee
+	// rate and its deadline is the current height, so wallet inputs are
+	// judged at the max fee rate, which the fee function starts at.
+	maxFeeRate := DefaultMaxFeeRate.FeePerKWeight()
 	setNeedWallet.On("NeedWalletInput").Return(true).Once()
-	setNeedWallet.On("AddWalletInputs", wallet).Return(nil).Once()
+	setNeedWallet.On(
+		"AddWalletInputs", wallet, maxFeeRate, maxFeeRate,
+	).Return(nil).Once()
 
 	// Mock the wallet to require the lock once.
 	wallet.On("WithCoinSelectLock", mock.Anything).Return(nil).Once()
@@ -658,10 +664,10 @@ func TestSweepPendingInputs(t *testing.T) {
 	// Mock the methods used in `sweep`. This is not important for this
 	// unit test.
 	setNeedWallet.On("Inputs").Return(nil).Maybe()
-	setNeedWallet.On("DeadlineHeight").Return(testHeight).Once()
+	setNeedWallet.On("DeadlineHeight").Return(testHeight).Twice()
 	setNeedWallet.On("Budget").Return(btcutil.Amount(1)).Once()
 	setNeedWallet.On("StartingFeeRate").Return(
-		fn.None[chainfee.SatPerKWeight]()).Once()
+		fn.None[chainfee.SatPerKWeight]()).Twice()
 	setNeedWallet.On("Immediate").Return(false).Once()
 	normalSet.On("Inputs").Return(nil).Maybe()
 	normalSet.On("DeadlineHeight").Return(testHeight).Once()
@@ -1528,4 +1534,98 @@ func TestHandleBumpEventTxUnknownSpendWithRetry(t *testing.T) {
 
 	// Assert the state of the input is updated.
 	require.Equal(t, PublishFailed, s.inputs[op2].state)
+}
+
+// TestStartingFeeRate checks that the sweeper judges wallet inputs at the fee
+// rate the linear fee function starts at.
+func TestStartingFeeRate(t *testing.T) {
+	t.Parallel()
+
+	const (
+		relayFeeRate = chainfee.SatPerKWeight(253)
+		estimate     = chainfee.SatPerKWeight(5_000)
+	)
+
+	maxFeeRate := DefaultMaxFeeRate.FeePerKWeight()
+	farDeadline := testHeight + int32(chainfee.MaxBlockTarget)
+	dummyErr := errors.New("dummy error")
+
+	testCases := []struct {
+		name         string
+		startingRate fn.Option[chainfee.SatPerKWeight]
+		deadline     int32
+		estimate     chainfee.SatPerKWeight
+		estimateErr  error
+		expected     chainfee.SatPerKWeight
+	}{
+		{
+			name:         "starting fee rate specified",
+			startingRate: fn.Some(chainfee.SatPerKWeight(1_000)),
+			deadline:     testHeight + 6,
+			expected:     1_000,
+		},
+		{
+			name:         "deadline reached",
+			startingRate: fn.None[chainfee.SatPerKWeight](),
+			deadline:     testHeight + 1,
+			expected:     maxFeeRate,
+		},
+		{
+			name:         "deadline beyond max block target",
+			startingRate: fn.None[chainfee.SatPerKWeight](),
+			deadline:     farDeadline,
+			expected:     relayFeeRate,
+		},
+		{
+			name:         "estimated from deadline",
+			startingRate: fn.None[chainfee.SatPerKWeight](),
+			deadline:     testHeight + 6,
+			estimate:     estimate,
+			expected:     estimate,
+		},
+		{
+			name:         "estimate below relay fee",
+			startingRate: fn.None[chainfee.SatPerKWeight](),
+			deadline:     testHeight + 6,
+			estimate:     relayFeeRate - 1,
+			expected:     relayFeeRate,
+		},
+		{
+			name:         "estimate fails",
+			startingRate: fn.None[chainfee.SatPerKWeight](),
+			deadline:     testHeight + 6,
+			estimateErr:  dummyErr,
+			expected:     relayFeeRate,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			estimator := &chainfee.MockEstimator{}
+			defer estimator.AssertExpectations(t)
+
+			if tc.estimate != 0 || tc.estimateErr != nil {
+				estimator.On(
+					"EstimateFeePerKW", uint32(6),
+				).Return(tc.estimate, tc.estimateErr).Once()
+			}
+
+			set := &MockInputSet{}
+			defer set.AssertExpectations(t)
+
+			set.On("StartingFeeRate").Return(tc.startingRate).Once()
+			set.On("DeadlineHeight").Return(tc.deadline).Maybe()
+
+			s := New(&UtxoSweeperConfig{
+				FeeEstimator: estimator,
+				MaxFeeRate:   DefaultMaxFeeRate,
+			})
+			s.currentHeight = testHeight
+			s.relayFeeRate = relayFeeRate
+
+			require.Equal(t, tc.expected, s.startingFeeRate(set))
+		})
+	}
 }
