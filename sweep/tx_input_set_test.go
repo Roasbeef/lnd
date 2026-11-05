@@ -556,6 +556,59 @@ func TestAddWalletInputsEmptyWalletSuccess(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestAddWalletInputsLargestFirst checks that wallet inputs are selected
+// largest first so the fewest inputs cover the budget.
+func TestAddWalletInputsLargestFirst(t *testing.T) {
+	t.Parallel()
+
+	wallet := &MockWallet{}
+	defer wallet.AssertExpectations(t)
+
+	const (
+		budget  = 10_000
+		numDust = 100
+	)
+
+	// Create an input whose required output prevents it from paying its own
+	// budget.
+	mockInput := &input.MockInput{}
+	mockInput.On("RequiredTxOut").Return(&wire.TxOut{})
+	defer mockInput.AssertExpectations(t)
+
+	set := BudgetInputSet{
+		inputs: []*SweeperInput{{
+			Input: mockInput,
+			params: Params{
+				Budget: budget,
+			},
+		}},
+	}
+
+	// Add many dust UTXOs before one UTXO that can cover the full budget.
+	utxos := make([]*lnwallet.Utxo, 0, numDust+1)
+	for i := 0; i < numDust; i++ {
+		utxos = append(utxos, &lnwallet.Utxo{
+			AddressType: lnwallet.WitnessPubKey,
+			Value:       330,
+		})
+	}
+	utxos = append(utxos, &lnwallet.Utxo{
+		AddressType: lnwallet.WitnessPubKey,
+		Value:       budget,
+	})
+
+	wallet.On(
+		"ListUnspentWitnessFromDefaultAccount",
+		int32(1), int32(math.MaxInt32),
+	).Return(utxos, nil).Once()
+
+	require.NoError(t, set.AddWalletInputs(wallet))
+	require.Equal(t, 2, len(set.inputs))
+	require.EqualValues(
+		t, budget, set.inputs[1].SignDesc().Output.Value,
+	)
+}
+
 // TestAddWalletInputsSuccess checks that when there are enough wallet utxos,
 // they are added to the input set.
 func TestAddWalletInputsSuccess(t *testing.T) {

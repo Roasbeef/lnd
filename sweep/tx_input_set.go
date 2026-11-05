@@ -358,13 +358,14 @@ func (b *BudgetInputSet) AddWalletInputs(wallet Wallet) error {
 		return fmt.Errorf("list unspent witness: %w", err)
 	}
 
-	// Sort the UTXOs by putting smaller values at the start of the slice
-	// to avoid locking large UTXO for sweeping.
+	// Sort the UTXOs largest first so the fewest inputs cover the budget.
+	// This avoids producing an oversized sweep or limiting its fee rate when
+	// the wallet contains many small UTXOs.
 	//
 	// TODO(yy): add more choices to CoinSelectionStrategy and use the
 	// configured value here.
 	sort.Slice(utxos, func(i, j int) bool {
-		return utxos[i].Value < utxos[j].Value
+		return utxos[i].Value > utxos[j].Value
 	})
 
 	// Add wallet inputs to the set until the specified budget is covered.
