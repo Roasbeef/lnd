@@ -667,7 +667,7 @@ func TestSweepPendingInputs(t *testing.T) {
 	setNeedWallet.On("DeadlineHeight").Return(testHeight).Twice()
 	setNeedWallet.On("Budget").Return(btcutil.Amount(1)).Once()
 	setNeedWallet.On("StartingFeeRate").Return(
-		fn.None[chainfee.SatPerKWeight]()).Twice()
+		fn.None[chainfee.SatPerKWeight]()).Once()
 	setNeedWallet.On("Immediate").Return(false).Once()
 	normalSet.On("Inputs").Return(nil).Maybe()
 	normalSet.On("DeadlineHeight").Return(testHeight).Once()
@@ -1571,6 +1571,12 @@ func TestStartingFeeRate(t *testing.T) {
 			expected:     maxFeeRate,
 		},
 		{
+			name:         "deadline reached with starting fee rate",
+			startingRate: fn.Some(chainfee.SatPerKWeight(1_000)),
+			deadline:     testHeight + 1,
+			expected:     maxFeeRate,
+		},
+		{
 			name:         "deadline beyond max block target",
 			startingRate: fn.None[chainfee.SatPerKWeight](),
 			deadline:     farDeadline,
@@ -1615,7 +1621,11 @@ func TestStartingFeeRate(t *testing.T) {
 			set := &MockInputSet{}
 			defer set.AssertExpectations(t)
 
-			set.On("StartingFeeRate").Return(tc.startingRate).Once()
+			if tc.deadline > testHeight+1 {
+				set.On("StartingFeeRate").Return(
+					tc.startingRate,
+				).Once()
+			}
 			set.On("DeadlineHeight").Return(tc.deadline).Maybe()
 
 			s := New(&UtxoSweeperConfig{

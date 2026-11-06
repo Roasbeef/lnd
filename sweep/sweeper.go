@@ -1641,13 +1641,20 @@ func (s *UtxoSweeper) sweepPendingInputs(inputs InputsMap) {
 
 // startingFeeRate returns the fee rate the fee bumper will first publish the
 // sweep transaction of the given set at. It mirrors the linear fee function:
-// the set's starting fee rate is used if specified, otherwise the fee rate is
-// estimated from the blocks left until the set's deadline. The returned rate
-// is not capped by the set's budget, which is left to the caller.
+// the max fee rate is used when the deadline is at most one block away;
+// otherwise, the set's starting fee rate is used if specified, or the fee rate
+// is estimated from the blocks left until the deadline. The returned rate is
+// not capped by the set's budget, which is left to the caller.
 func (s *UtxoSweeper) startingFeeRate(set InputSet) chainfee.SatPerKWeight {
+	deadline := set.DeadlineHeight()
+	confTarget := calcCurrentConfTarget(s.currentHeight, deadline)
+	if confTarget <= 1 {
+		return s.cfg.MaxFeeRate.FeePerKWeight()
+	}
+
 	return set.StartingFeeRate().UnwrapOrFunc(
 		func() chainfee.SatPerKWeight {
-			return s.estimateStartingFeeRate(set.DeadlineHeight())
+			return s.estimateStartingFeeRate(deadline)
 		},
 	)
 }
